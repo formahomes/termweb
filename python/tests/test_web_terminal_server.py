@@ -220,3 +220,13 @@ def test_missing_session_returns_not_found(terminal_server):
         http_request(f"{base_url}/api/sessions/missing/output?cursor=0")
 
     assert error.value.code == 404
+
+
+def test_client_has_local_echo_for_printable_characters(terminal_server):
+    server, port = terminal_server
+    status, body = http_request(f"http://{server.host}:{port}/")
+
+    assert status == 200
+    assert 'let localEchoBuffer = "";' in body
+    assert "function consumeLocalEcho(data)" in body
+    assert "terminal.write(consumeLocalEcho(payload.data))" in body

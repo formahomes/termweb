@@ -234,6 +234,7 @@ TERMINAL_PAGE = """<!DOCTYPE html>
       let pollGeneration = 0;
       let pendingInput = "";
       let flushInputSoon = null;
+      let localEchoBuffer = "";
       let ctrlArmed = false;
       let menuExpanded = false;
       const buttonInputs = {
@@ -443,7 +444,28 @@ TERMINAL_PAGE = """<!DOCTYPE html>
         flushInputSoon = window.setTimeout(flushPendingInput, INPUT_FLUSH_DELAY_MS);
       }
 
+      function consumeLocalEcho(data) {
+        var i = 0;
+        while (i < data.length && localEchoBuffer.length > 0) {
+          if (data[i] === localEchoBuffer[0]) {
+            localEchoBuffer = localEchoBuffer.slice(1);
+            i++;
+          } else {
+            localEchoBuffer = "";
+            break;
+          }
+        }
+        return data.slice(i);
+      }
+
       function queueInput(data) {
+        if (data.length === 1) {
+          var code = data.charCodeAt(0);
+          if (code >= 32 && code < 127) {
+            terminal.write(data);
+            localEchoBuffer += data;
+          }
+        }
         pendingInput += data;
         scheduleInputFlush();
       }
@@ -529,7 +551,7 @@ TERMINAL_PAGE = """<!DOCTYPE html>
           }
           const payload = await response.json();
           if (payload.data) {
-            terminal.write(payload.data);
+            terminal.write(consumeLocalEcho(payload.data));
           }
           cursor = payload.cursor;
           if (payload.closed) {
@@ -566,6 +588,7 @@ TERMINAL_PAGE = """<!DOCTYPE html>
         sessionId = nextSessionId;
         cursor = 0;
         pendingInput = "";
+        localEchoBuffer = "";
         ctrlArmed = false;
         setCtrlButtonState();
         if (typeof terminal.clear === "function") {
@@ -590,6 +613,7 @@ TERMINAL_PAGE = """<!DOCTYPE html>
           sessionId = null;
           cursor = 0;
           pendingInput = "";
+          localEchoBuffer = "";
           window.localStorage.removeItem("saibai-terminal-session");
           if (typeof terminal.clear === "function") {
             terminal.clear();

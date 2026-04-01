@@ -4,12 +4,12 @@
 import argparse
 import base64
 import hashlib
+import io
 import json
 import os
 import pty
 import select
 import signal
-import socket
 import subprocess
 import termios
 import threading
@@ -1062,13 +1062,10 @@ class TerminalRequestHandler(BaseHTTPRequestHandler):
         )
         self.wfile.write(response.encode())
         self.wfile.flush()
-        ws_sock = socket.fromfd(
-            os.dup(self.connection.fileno()), self.connection.family, self.connection.type
-        )
-        try:
-            ws_relay(ws_sock, ws_sock, session)
-        finally:
-            ws_sock.close()
+        self.rfile.close()
+        self.rfile = io.BytesIO()
+        self.close_connection = True
+        ws_relay(self.connection, self.connection, session)
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)

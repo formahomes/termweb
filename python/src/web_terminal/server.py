@@ -445,17 +445,32 @@ TERMINAL_PAGE = """<!DOCTYPE html>
       }
 
       function consumeLocalEcho(data) {
+        if (!localEchoBuffer) return data;
+        var out = "";
+        var bufPos = 0;
         var i = 0;
-        while (i < data.length && localEchoBuffer.length > 0) {
-          if (data[i] === localEchoBuffer[0]) {
-            localEchoBuffer = localEchoBuffer.slice(1);
+        while (i < data.length) {
+          if (data[i] === "\x1b") {
+            var seqEnd = i + 1;
+            if (seqEnd < data.length && data[seqEnd] === "[") {
+              seqEnd++;
+              while (seqEnd < data.length && data[seqEnd] >= "\x20" && data[seqEnd] <= "\x3f") seqEnd++;
+              if (seqEnd < data.length) seqEnd++;
+            } else if (seqEnd < data.length) {
+              seqEnd++;
+            }
+            out += data.slice(i, seqEnd);
+            i = seqEnd;
+          } else if (bufPos < localEchoBuffer.length && data[i] === localEchoBuffer[bufPos]) {
+            bufPos++;
             i++;
           } else {
-            localEchoBuffer = "";
-            break;
+            out += data[i];
+            i++;
           }
         }
-        return data.slice(i);
+        localEchoBuffer = localEchoBuffer.slice(bufPos);
+        return out;
       }
 
       function queueInput(data) {

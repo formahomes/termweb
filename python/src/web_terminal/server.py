@@ -814,28 +814,28 @@ def ws_accept_key(client_key: str) -> str:
     return base64.b64encode(digest).decode()
 
 
-def ws_read_frame(sock) -> Optional[tuple]:
+def ws_read_frame(reader) -> Optional[tuple]:
     """Read one WebSocket frame and return (opcode, payload_bytes) or None on EOF."""
-    header = _ws_recv_exact(sock, 2)
+    header = _ws_read_exact(reader, 2)
     if header is None:
         return None
     opcode = header[0] & 0x0F
     masked = bool(header[1] & 0x80)
     length = header[1] & 0x7F
     if length == 126:
-        ext = _ws_recv_exact(sock, 2)
+        ext = _ws_read_exact(reader, 2)
         if ext is None:
             return None
         length = int.from_bytes(ext, "big")
     elif length == 127:
-        ext = _ws_recv_exact(sock, 8)
+        ext = _ws_read_exact(reader, 8)
         if ext is None:
             return None
         length = int.from_bytes(ext, "big")
-    mask_key = _ws_recv_exact(sock, 4) if masked else None
+    mask_key = _ws_read_exact(reader, 4) if masked else None
     if masked and mask_key is None:
         return None
-    payload = _ws_recv_exact(sock, length) if length > 0 else b""
+    payload = _ws_read_exact(reader, length) if length > 0 else b""
     if payload is None:
         return None
     if masked and mask_key:
@@ -856,21 +856,18 @@ def ws_send_frame(sock, opcode: int, payload: bytes) -> None:
     sock.sendall(header + payload)
 
 
-def _ws_recv_exact(sock, count: int) -> Optional[bytes]:
-    """Read exactly count bytes from a socket, or return None on EOF."""
-    buf = b""
-    while len(buf) < count:
-        try:
-            chunk = sock.recv(count - len(buf))
-        except OSError:
-            return None
-        if not chunk:
-            return None
-        buf += chunk
+def _ws_read_exact(reader, count: int) -> Optional[bytes]:
+    """Read exactly count bytes from a file-like reader, or return None on EOF."""
+    try:
+        buf = reader.read(count)
+    except OSError:
+        return None
+    if buf is None or len(buf) < count:
+        return None
     return buf
 
 
-def ws_relay(sock, session: "TerminalSession") -> None:
+def ws_relay(sock, reader, session: "TerminalSession") -> None:
     """Relay data between a WebSocket and a PTY session until either side closes."""
     cursor = 0
 
@@ -896,7 +893,7 @@ def ws_relay(sock, session: "TerminalSession") -> None:
 
     try:
         while True:
-            frame = ws_read_frame(sock)
+            frame = ws_read_frame(reader)
             if frame is None:
                 break
             opcode, payload = frame
@@ -1059,9 +1056,8 @@ class TerminalRequestHandler(BaseHTTPRequestHandler):
             f"Sec-WebSocket-Accept: {accept}\r\n"
             "\r\n"
         )
-        self.wfile.write(response.encode())
-        self.wfile.flush()
-        ws_relay(self.connection, session)
+        self.connection.sendall(response.encode())
+        ws_relay(self.connection, self.rfile, session)
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)

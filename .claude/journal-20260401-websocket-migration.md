@@ -1,5 +1,8 @@
 # 2026-04-01 — WebSocket migration: replacing HTTP polling for terminal I/O
 
+## 2026-04-01 Update: Root cause found for browser disconnect
+The WS_MAGIC GUID was wrong — `258EAFA5-E914-47DA-95CA-5AB5A60AD65C` instead of the RFC 6455 value `258EAFA5-E914-47DA-95CA-C5AB0DC85B11`. Browser computed the expected accept key with the real GUID, server computed it with the wrong one, so the browser rejected the handshake and dropped the connection after 101. Tests passed because both sides used the same wrong constant. Fixed in commit 728f74d.
+
 ## Goal
 Make terminal input feel instant on slow (cell) connections. Previously, keystrokes were only visible after the server echoed them back through a 250ms HTTP polling loop.
 
@@ -29,7 +32,7 @@ This consumed most of the session. The core problem: `BaseHTTPRequestHandler` wr
 - You CANNOT mix `makefile()` file objects with direct `socket.recv()`/`sendall()` calls reliably. Python docs warn about this but it's easy to miss.
 - `socket.fromfd()` calls `dup()` internally — don't `os.dup()` before passing to it.
 - Firefox may block WebSocket connections to a different port than the page origin (observed but not 100% confirmed as the cause).
-- The `websocket-client` Python library v1.8.0 uses a non-standard GUID (`258EAFA5-E914-47DA-95CA-C5AB0DC85B11`) vs RFC 6455's `258EAFA5-E914-47DA-95CA-5AB5A60AD65C`. Tests had to use raw sockets instead.
+- The `websocket-client` Python library v1.8.0 uses the correct RFC 6455 GUID (`258EAFA5-E914-47DA-95CA-C5AB0DC85B11`). Our code had a wrong GUID (`258EAFA5-E914-47DA-95CA-5AB5A60AD65C`) — this was the root cause of browser disconnects. Tests used raw sockets that imported the same wrong constant, masking the bug.
 
 ### Server architecture (current)
 - `TerminalRequestHandler.setup()`: peeks at incoming data, intercepts WebSocket upgrades before BaseHTTPRequestHandler creates buffered I/O
@@ -44,4 +47,4 @@ This consumed most of the session. The core problem: `BaseHTTPRequestHandler` wr
 - No local echo — WebSocket latency should be low enough
 
 ## Status
-Tests all pass (10/10). Awaiting Steve's browser confirmation that the same-port `setup()` interception approach works in Firefox.
+Tests all pass (8/8). Wrong WS_MAGIC GUID fixed (commit 728f74d). Awaiting Steve's browser confirmation.

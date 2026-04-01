@@ -305,7 +305,7 @@ def test_websocket_streams_terminal_io(terminal_server):
     _, session_payload = http_request(f"{base_url}/api/sessions", method="POST")
     session_id = session_payload["session_id"]
 
-    sock = ws_connect(server.host, server.ws_port, f"/api/sessions/{session_id}/ws")
+    sock = ws_connect(server.host, port, f"/api/sessions/{session_id}/ws")
     try:
         ws_send_text(sock, "printf '__WS_OK__\\n'\n")
         deadline = time.time() + OUTPUT_TIMEOUT_SECONDS

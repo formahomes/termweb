@@ -498,10 +498,7 @@ TERMINAL_PAGE = """<!DOCTYPE html>
 
       function openWebSocket(wsSessionId) {
         var protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-        var hostname = window.location.hostname;
-        var wsPort = parseInt(window.location.port || "80", 10) + 1;
-        var url = protocol + "//" + hostname + ":" + wsPort + "/api/sessions/" + wsSessionId + "/ws";
-        console.log("WebSocket connecting to:", url);
+        var url = protocol + "//" + window.location.host + "/api/sessions/" + wsSessionId + "/ws";
         var socket = new WebSocket(url);
         socket.onmessage = function(event) {
           terminal.write(event.data);
@@ -921,15 +918,16 @@ def ws_relay(sock, reader, session: "TerminalSession") -> None:
         output_thread.join(timeout=2.0)
 
 
-def ws_handle_connection(conn, service):
+def ws_handle_connection(conn, service, data=None):
     """Handle a raw WebSocket connection: handshake then relay to a session."""
     try:
-        data = b""
-        while b"\r\n\r\n" not in data:
-            chunk = conn.recv(4096)
-            if not chunk:
-                return
-            data += chunk
+        if data is None:
+            data = b""
+            while b"\r\n\r\n" not in data:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    return
+                data += chunk
         request_line = data.split(b"\r\n")[0].decode()
         path = request_line.split(" ")[1] if " " in request_line else ""
         headers = {}
@@ -1092,6 +1090,38 @@ class TerminalRequestHandler(BaseHTTPRequestHandler):
     @property
     def service(self) -> WebTerminalServer:
         return self.server.service
+
+    def setup(self):
+        """Intercept WebSocket upgrades before BaseHTTPRequestHandler creates buffered I/O."""
+        self.connection = self.request
+        if self.timeout is not None:
+            self.connection.settimeout(self.timeout)
+        self._ws_request_data = None
+        try:
+            peeked = self.connection.recv(4096, socket.MSG_PEEK)
+        except OSError:
+            peeked = b""
+        if b"Upgrade: websocket" in peeked or b"upgrade: websocket" in peeked:
+            data = b""
+            while b"\r\n\r\n" not in data:
+                chunk = self.connection.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+            self._ws_request_data = data
+        else:
+            super().setup()
+
+    def handle(self):
+        if self._ws_request_data is not None:
+            ws_handle_connection(self.connection, self.service, self._ws_request_data)
+            return
+        super().handle()
+
+    def finish(self):
+        if self._ws_request_data is not None:
+            return
+        super().finish()
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)

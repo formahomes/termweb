@@ -4,12 +4,12 @@
 import argparse
 import base64
 import hashlib
-import io
 import json
 import os
 import pty
 import select
 import signal
+import socket
 import subprocess
 import termios
 import threading
@@ -29,6 +29,7 @@ except ImportError as error:
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
+DEFAULT_WS_PORT_OFFSET = 1
 DEFAULT_COLS = 120
 DEFAULT_ROWS = 32
 DEFAULT_OUTPUT_TIMEOUT = 0.25
@@ -497,7 +498,10 @@ TERMINAL_PAGE = """<!DOCTYPE html>
 
       function openWebSocket(wsSessionId) {
         var protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-        var url = protocol + "//" + window.location.host + "/api/sessions/" + wsSessionId + "/ws";
+        var hostname = window.location.hostname;
+        var wsPort = parseInt(window.location.port || "80", 10) + 1;
+        var url = protocol + "//" + hostname + ":" + wsPort + "/api/sessions/" + wsSessionId + "/ws";
+        console.log("WebSocket connecting to:", url);
         var socket = new WebSocket(url);
         socket.onmessage = function(event) {
           terminal.write(event.data);
@@ -917,6 +921,74 @@ def ws_relay(sock, reader, session: "TerminalSession") -> None:
         output_thread.join(timeout=2.0)
 
 
+def ws_handle_connection(conn, service):
+    """Handle a raw WebSocket connection: handshake then relay to a session."""
+    try:
+        data = b""
+        while b"\r\n\r\n" not in data:
+            chunk = conn.recv(4096)
+            if not chunk:
+                return
+            data += chunk
+        request_line = data.split(b"\r\n")[0].decode()
+        path = request_line.split(" ")[1] if " " in request_line else ""
+        headers = {}
+        for line in data.decode().split("\r\n")[1:]:
+            if ": " in line:
+                key, value = line.split(": ", 1)
+                headers[key.lower()] = value
+        parts = path.strip("/").split("/")
+        if len(parts) < 4 or parts[0] != "api" or parts[1] != "sessions" or parts[3] != "ws":
+            conn.sendall(b"HTTP/1.1 400 Bad Request\r\n\r\n")
+            return
+        session_id = parts[2]
+        client_key = headers.get("sec-websocket-key", "")
+        if not client_key:
+            conn.sendall(b"HTTP/1.1 400 Bad Request\r\n\r\n")
+            return
+        try:
+            session = service._get_session(session_id)
+        except KeyError:
+            conn.sendall(b"HTTP/1.1 404 Not Found\r\n\r\n")
+            return
+        accept = ws_accept_key(client_key)
+        response = (
+            "HTTP/1.1 101 Switching Protocols\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Accept: {accept}\r\n"
+            "\r\n"
+        ).encode()
+        conn.sendall(response)
+        ws_relay(conn, conn, session)
+    except OSError:
+        pass
+    finally:
+        try:
+            conn.close()
+        except OSError:
+            pass
+
+
+def ws_serve_forever(host, port, service):
+    """Accept WebSocket connections on a dedicated socket."""
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind((host, port))
+    srv.listen(8)
+    try:
+        while True:
+            conn, _addr = srv.accept()
+            thread = threading.Thread(
+                target=ws_handle_connection, args=(conn, service), daemon=True
+            )
+            thread.start()
+    except OSError:
+        pass
+    finally:
+        srv.close()
+
+
 class WebTerminalServer:
     """Threaded HTTP server that exposes PTY-backed terminal sessions."""
 
@@ -945,6 +1017,11 @@ class WebTerminalServer:
 
         self._httpd = TerminalHTTPServer((self.host, self.port), TerminalRequestHandler)
         self._httpd.service = self
+        self.ws_port = self.port + DEFAULT_WS_PORT_OFFSET
+        ws_thread = threading.Thread(
+            target=ws_serve_forever, args=(self.host, self.ws_port, self), daemon=True
+        )
+        ws_thread.start()
         self._running = True
         try:
             self._httpd.serve_forever()
@@ -1024,9 +1101,6 @@ class TerminalRequestHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/sessions":
             self._send_json(self.service.list_sessions())
             return
-        if parsed.path.startswith("/api/sessions/") and parsed.path.endswith("/ws"):
-            self._handle_websocket_upgrade(parsed.path)
-            return
         if parsed.path.startswith("/api/sessions/") and parsed.path.endswith("/output"):
             session_id = parsed.path.split("/")[3]
             query = parse_qs(parsed.query)
@@ -1040,32 +1114,6 @@ class TerminalRequestHandler(BaseHTTPRequestHandler):
             self._send_json(payload)
             return
         self._send_error(HTTPStatus.NOT_FOUND, "Route not found")
-
-    def _handle_websocket_upgrade(self, path: str) -> None:
-        session_id = path.split("/")[3]
-        try:
-            session = self.service._get_session(session_id)
-        except KeyError:
-            self._send_error(HTTPStatus.NOT_FOUND, "Session not found")
-            return
-        client_key = self.headers.get("Sec-WebSocket-Key", "")
-        if not client_key:
-            self._send_error(HTTPStatus.BAD_REQUEST, "Missing WebSocket key")
-            return
-        accept = ws_accept_key(client_key)
-        response = (
-            "HTTP/1.1 101 Switching Protocols\r\n"
-            "Upgrade: websocket\r\n"
-            "Connection: Upgrade\r\n"
-            f"Sec-WebSocket-Accept: {accept}\r\n"
-            "\r\n"
-        )
-        self.wfile.write(response.encode())
-        self.wfile.flush()
-        self.rfile.close()
-        self.rfile = io.BytesIO()
-        self.close_connection = True
-        ws_relay(self.connection, self.connection, session)
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
@@ -1135,6 +1183,8 @@ class TerminalRequestHandler(BaseHTTPRequestHandler):
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(encoded)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(encoded)
 
@@ -1143,6 +1193,7 @@ class TerminalRequestHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(body)
 

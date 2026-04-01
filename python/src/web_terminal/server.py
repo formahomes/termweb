@@ -1,7 +1,9 @@
 # ABOUTME: Serves a browser terminal page and backs each session with a local PTY shell.
-# ABOUTME: Streams terminal output over HTTP polling and accepts shell input and resize events.
+# ABOUTME: Streams terminal I/O over WebSocket and accepts session management over HTTP.
 
 import argparse
+import base64
+import hashlib
 import json
 import os
 import pty
@@ -30,7 +32,6 @@ DEFAULT_COLS = 120
 DEFAULT_ROWS = 32
 DEFAULT_OUTPUT_TIMEOUT = 0.25
 DEFAULT_READ_SIZE = 4096
-INPUT_FLUSH_DELAY_MS = 16
 PROCESS_EXIT_TIMEOUT = 1.0
 TERMINAL_PAGE = """<!DOCTYPE html>
 <html lang="en">
@@ -226,15 +227,10 @@ TERMINAL_PAGE = """<!DOCTYPE html>
       const newSessionNode = document.getElementById("new-session");
       const closeSessionNode = document.getElementById("close-session");
       const keyButtons = Array.from(document.querySelectorAll("[data-key]"));
-      const INPUT_FLUSH_DELAY_MS = 16;
       const SESSION_STORAGE_KEY = "saibai-terminal-session";
       let sessionId = null;
       let sessionList = [];
-      let cursor = 0;
-      let pollGeneration = 0;
-      let pendingInput = "";
-      let flushInputSoon = null;
-      let localEchoBuffer = "";
+      let ws = null;
       let ctrlArmed = false;
       let menuExpanded = false;
       const buttonInputs = {
@@ -421,46 +417,10 @@ TERMINAL_PAGE = """<!DOCTYPE html>
         return await response.json();
       }
 
-      async function flushPendingInput() {
-        flushInputSoon = null;
-        if (!sessionId || !pendingInput) {
-          return;
+      function sendInput(data) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(data);
         }
-        const data = pendingInput;
-        pendingInput = "";
-        try {
-          await sendJson("/api/sessions/" + sessionId + "/input", "POST", { data });
-        } catch (error) {
-          pendingInput = data + pendingInput;
-          setStatus("Input failed");
-          console.error(error);
-        }
-      }
-
-      function scheduleInputFlush() {
-        if (flushInputSoon !== null) {
-          return;
-        }
-        flushInputSoon = window.setTimeout(flushPendingInput, INPUT_FLUSH_DELAY_MS);
-      }
-
-      function consumeLocalEcho(data) {
-        if (!localEchoBuffer) return data;
-        var eraseLen = localEchoBuffer.length;
-        localEchoBuffer = "";
-        return "\x1b[" + eraseLen + "D\x1b[K" + data;
-      }
-
-      function queueInput(data) {
-        if (data.length === 1) {
-          var code = data.charCodeAt(0);
-          if (code >= 32 && code < 127) {
-            terminal.write(data);
-            localEchoBuffer += data;
-          }
-        }
-        pendingInput += data;
-        scheduleInputFlush();
       }
 
       function setCtrlButtonState() {
@@ -534,54 +494,37 @@ TERMINAL_PAGE = """<!DOCTYPE html>
         });
       }
 
-      async function pollOutput(pollSessionId, generation) {
-        while (sessionId === pollSessionId && pollGeneration === generation) {
-          const response = await fetch(
-            "/api/sessions/" + pollSessionId + "/output?cursor=" + cursor + "&timeout=0.25"
-          );
-          if (!response.ok) {
-            throw new Error("Polling failed: " + response.status);
+      function openWebSocket(wsSessionId) {
+        var protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+        var url = protocol + "//" + window.location.host + "/api/sessions/" + wsSessionId + "/ws";
+        var socket = new WebSocket(url);
+        socket.onmessage = function(event) {
+          terminal.write(event.data);
+        };
+        socket.onclose = function() {
+          if (sessionId === wsSessionId) {
+            setStatus("Disconnected");
+            terminal.writeln("");
+            terminal.writeln("[terminal disconnected]");
+            listSessions().catch(function(error) { console.error(error); });
           }
-          const payload = await response.json();
-          if (payload.data) {
-            terminal.write(consumeLocalEcho(payload.data));
-          }
-          cursor = payload.cursor;
-          if (payload.closed) {
-            await listSessions();
-            if (sessionId === pollSessionId && pollGeneration === generation) {
-              setStatus("Closed via " + terminal.clientName);
-            }
-            return;
-          }
-        }
-      }
-
-      function startPolling(pollSessionId, generation) {
-        pollOutput(pollSessionId, generation).catch((error) => {
-          setStatus("Disconnected");
-          terminal.writeln("");
-          terminal.writeln("[terminal disconnected]");
-          console.error(error);
-        });
+        };
+        socket.onerror = function(error) {
+          console.error("WebSocket error:", error);
+        };
+        return socket;
       }
 
       async function connectToSession(nextSessionId) {
         if (!nextSessionId) {
           return;
         }
-        if (flushInputSoon !== null) {
-          window.clearTimeout(flushInputSoon);
-          flushInputSoon = null;
+        if (ws) {
+          ws.onclose = null;
+          ws.close();
+          ws = null;
         }
-        if (pendingInput && sessionId) {
-          await flushPendingInput();
-        }
-        pollGeneration += 1;
         sessionId = nextSessionId;
-        cursor = 0;
-        pendingInput = "";
-        localEchoBuffer = "";
         ctrlArmed = false;
         setCtrlButtonState();
         if (typeof terminal.clear === "function") {
@@ -591,8 +534,8 @@ TERMINAL_PAGE = """<!DOCTYPE html>
         await resizeTerminal();
         window.localStorage.setItem("saibai-terminal-session", sessionId);
         renderSessionPicker();
+        ws = openWebSocket(sessionId);
         setStatus("Connected via " + terminal.clientName);
-        startPolling(sessionId, pollGeneration);
       }
 
       async function closeSelectedSession() {
@@ -602,11 +545,12 @@ TERMINAL_PAGE = """<!DOCTYPE html>
         }
         await sendJson("/api/sessions/" + targetSessionId, "DELETE");
         if (sessionId === targetSessionId) {
-          pollGeneration += 1;
+          if (ws) {
+            ws.onclose = null;
+            ws.close();
+            ws = null;
+          }
           sessionId = null;
-          cursor = 0;
-          pendingInput = "";
-          localEchoBuffer = "";
           window.localStorage.removeItem("saibai-terminal-session");
           if (typeof terminal.clear === "function") {
             terminal.clear();
@@ -620,7 +564,7 @@ TERMINAL_PAGE = """<!DOCTYPE html>
         if (!sessionId) {
           return;
         }
-        queueInput(useCtrlModifier(data));
+        sendInput(useCtrlModifier(data));
       });
 
       keyButtons.forEach((button) => {
@@ -635,7 +579,7 @@ TERMINAL_PAGE = """<!DOCTYPE html>
             return;
           }
           if (buttonInputs[key]) {
-            queueInput(buttonInputs[key]);
+            sendInput(buttonInputs[key]);
           }
         });
       });
@@ -683,18 +627,10 @@ TERMINAL_PAGE = """<!DOCTYPE html>
       }
 
       window.addEventListener("beforeunload", () => {
-        if (sessionId) {
-          if (flushInputSoon !== null) {
-            window.clearTimeout(flushInputSoon);
-            flushInputSoon = null;
-          }
-          if (pendingInput) {
-            navigator.sendBeacon(
-              "/api/sessions/" + sessionId + "/input",
-              JSON.stringify({ data: pendingInput })
-            );
-            pendingInput = "";
-          }
+        if (ws) {
+          ws.onclose = null;
+          ws.close();
+          ws = null;
         }
       });
 
@@ -865,6 +801,121 @@ class TerminalSession:
         fcntl.ioctl(self._master_fd, termios.TIOCSWINSZ, size)
 
 
+WS_MAGIC = "258EAFA5-E914-47DA-95CA-5AB5A60AD65C"
+WS_OP_TEXT = 0x1
+WS_OP_CLOSE = 0x8
+WS_OP_PING = 0x9
+WS_OP_PONG = 0xA
+
+
+def ws_accept_key(client_key: str) -> str:
+    """Compute the Sec-WebSocket-Accept header value."""
+    digest = hashlib.sha1((client_key.strip() + WS_MAGIC).encode()).digest()
+    return base64.b64encode(digest).decode()
+
+
+def ws_read_frame(sock) -> Optional[tuple]:
+    """Read one WebSocket frame and return (opcode, payload_bytes) or None on EOF."""
+    header = _ws_recv_exact(sock, 2)
+    if header is None:
+        return None
+    opcode = header[0] & 0x0F
+    masked = bool(header[1] & 0x80)
+    length = header[1] & 0x7F
+    if length == 126:
+        ext = _ws_recv_exact(sock, 2)
+        if ext is None:
+            return None
+        length = int.from_bytes(ext, "big")
+    elif length == 127:
+        ext = _ws_recv_exact(sock, 8)
+        if ext is None:
+            return None
+        length = int.from_bytes(ext, "big")
+    mask_key = _ws_recv_exact(sock, 4) if masked else None
+    if masked and mask_key is None:
+        return None
+    payload = _ws_recv_exact(sock, length) if length > 0 else b""
+    if payload is None:
+        return None
+    if masked and mask_key:
+        payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
+    return opcode, payload
+
+
+def ws_send_frame(sock, opcode: int, payload: bytes) -> None:
+    """Send a WebSocket frame (server-to-client, unmasked)."""
+    header = bytes([0x80 | opcode])
+    length = len(payload)
+    if length < 126:
+        header += bytes([length])
+    elif length < 65536:
+        header += bytes([126]) + length.to_bytes(2, "big")
+    else:
+        header += bytes([127]) + length.to_bytes(8, "big")
+    sock.sendall(header + payload)
+
+
+def _ws_recv_exact(sock, count: int) -> Optional[bytes]:
+    """Read exactly count bytes from a socket, or return None on EOF."""
+    buf = b""
+    while len(buf) < count:
+        try:
+            chunk = sock.recv(count - len(buf))
+        except OSError:
+            return None
+        if not chunk:
+            return None
+        buf += chunk
+    return buf
+
+
+def ws_relay(sock, session: "TerminalSession") -> None:
+    """Relay data between a WebSocket and a PTY session until either side closes."""
+    cursor = 0
+
+    def send_output():
+        nonlocal cursor
+        while not session._closed:
+            result = session.read(cursor=cursor, timeout=0.5)
+            cursor = result["cursor"]
+            if result["data"]:
+                try:
+                    ws_send_frame(sock, WS_OP_TEXT, result["data"].encode("utf-8"))
+                except OSError:
+                    return
+            if result["closed"]:
+                try:
+                    ws_send_frame(sock, WS_OP_CLOSE, b"")
+                except OSError:
+                    pass
+                return
+
+    output_thread = threading.Thread(target=send_output, daemon=True)
+    output_thread.start()
+
+    try:
+        while True:
+            frame = ws_read_frame(sock)
+            if frame is None:
+                break
+            opcode, payload = frame
+            if opcode == WS_OP_TEXT:
+                session.write(payload.decode("utf-8", errors="replace"))
+            elif opcode == WS_OP_PING:
+                ws_send_frame(sock, WS_OP_PONG, payload)
+            elif opcode == WS_OP_CLOSE:
+                try:
+                    ws_send_frame(sock, WS_OP_CLOSE, b"")
+                except OSError:
+                    pass
+                break
+    except OSError:
+        pass
+    finally:
+        output_thread.join(timeout=2.0)
+
+
 class WebTerminalServer:
     """Threaded HTTP server that exposes PTY-backed terminal sessions."""
 
@@ -972,6 +1023,9 @@ class TerminalRequestHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/sessions":
             self._send_json(self.service.list_sessions())
             return
+        if parsed.path.startswith("/api/sessions/") and parsed.path.endswith("/ws"):
+            self._handle_websocket_upgrade(parsed.path)
+            return
         if parsed.path.startswith("/api/sessions/") and parsed.path.endswith("/output"):
             session_id = parsed.path.split("/")[3]
             query = parse_qs(parsed.query)
@@ -985,6 +1039,29 @@ class TerminalRequestHandler(BaseHTTPRequestHandler):
             self._send_json(payload)
             return
         self._send_error(HTTPStatus.NOT_FOUND, "Route not found")
+
+    def _handle_websocket_upgrade(self, path: str) -> None:
+        session_id = path.split("/")[3]
+        try:
+            session = self.service._get_session(session_id)
+        except KeyError:
+            self._send_error(HTTPStatus.NOT_FOUND, "Session not found")
+            return
+        client_key = self.headers.get("Sec-WebSocket-Key", "")
+        if not client_key:
+            self._send_error(HTTPStatus.BAD_REQUEST, "Missing WebSocket key")
+            return
+        accept = ws_accept_key(client_key)
+        response = (
+            "HTTP/1.1 101 Switching Protocols\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Accept: {accept}\r\n"
+            "\r\n"
+        )
+        self.wfile.write(response.encode())
+        self.wfile.flush()
+        ws_relay(self.connection, session)
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)

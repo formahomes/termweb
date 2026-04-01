@@ -1,9 +1,12 @@
 # ABOUTME: Integration tests for a browser terminal server backed by a local PTY shell.
 # ABOUTME: Verifies the HTML client, session lifecycle, shell input, and streamed output.
 
+import base64
+import hashlib
 import json
 import os
 import socket
+import struct
 import sys
 import threading
 import time
@@ -15,7 +18,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from web_terminal.server import DEFAULT_HOST, WebTerminalServer
+from web_terminal.server import DEFAULT_HOST, WS_MAGIC, WebTerminalServer
 
 OUTPUT_TIMEOUT_SECONDS = 5.0
 POLL_INTERVAL_SECONDS = 0.05
@@ -103,11 +106,10 @@ def test_root_serves_browser_client(terminal_server):
     assert "https://cdn.jsdelivr.net/npm/xterm@5.5.0/lib/xterm.min.js" not in body
     assert "typeof window.Terminal === \"function\"" in body
     assert "basic terminal" in body.lower()
-    assert "let pendingInput = \"\";" in body
-    assert "const INPUT_FLUSH_DELAY_MS = 16;" in body
-    assert "function scheduleInputFlush()" in body
-    assert "pendingInput += data;" in body
-    assert "flushInputSoon = window.setTimeout(flushPendingInput, INPUT_FLUSH_DELAY_MS);" in body
+    assert "new WebSocket(" in body
+    assert "ws.send(data)" in body
+    assert "function sendInput(data)" in body
+    assert "function openWebSocket(" in body
     assert 'data-key="ctrl"' in body
     assert 'data-key="esc"' in body
     assert 'data-key="tab"' in body
@@ -121,13 +123,11 @@ def test_root_serves_browser_client(terminal_server):
     assert 'id="close-session"' in body
     assert 'id="menu-toggle"' in body
     assert 'class="shell__menu"' in body
-    assert "function queueInput(data)" in body
     assert "let ctrlArmed = false;" in body
     assert "let menuExpanded = false;" in body
     assert "function setMenuExpanded(expanded)" in body
     assert "const buttonInputs = {" in body
     assert "window.localStorage.getItem(\"saibai-terminal-session\")" in body
-    assert 'navigator.sendBeacon("/api/sessions/" + sessionId + "/close")' not in body
     assert "100dvh" in body
     assert "function updateViewportMetrics()" in body
     assert "window.visualViewport" in body
@@ -222,11 +222,109 @@ def test_missing_session_returns_not_found(terminal_server):
     assert error.value.code == 404
 
 
-def test_client_has_local_echo_for_printable_characters(terminal_server):
+def ws_connect(host, port, path):
+    """Open a raw WebSocket connection and return the socket."""
+    sock = socket.create_connection((host, port), timeout=OUTPUT_TIMEOUT_SECONDS)
+    key = base64.b64encode(os.urandom(16)).decode()
+    request = (
+        f"GET {path} HTTP/1.1\r\n"
+        f"Host: {host}:{port}\r\n"
+        "Upgrade: websocket\r\n"
+        "Connection: Upgrade\r\n"
+        f"Sec-WebSocket-Key: {key}\r\n"
+        "Sec-WebSocket-Version: 13\r\n"
+        "\r\n"
+    )
+    sock.sendall(request.encode())
+    response = b""
+    while b"\r\n\r\n" not in response:
+        chunk = sock.recv(4096)
+        if not chunk:
+            raise RuntimeError("Connection closed during handshake")
+        response += chunk
+    header_block = response.split(b"\r\n\r\n")[0].decode()
+    assert "101" in header_block.split("\r\n")[0]
+    expected_accept = base64.b64encode(
+        hashlib.sha1((key + WS_MAGIC).encode()).digest()
+    ).decode()
+    assert expected_accept in header_block
+    return sock
+
+
+def ws_send_text(sock, text):
+    """Send a masked WebSocket text frame."""
+    payload = text.encode("utf-8")
+    mask = os.urandom(4)
+    masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+    header = bytes([0x81])
+    length = len(payload)
+    if length < 126:
+        header += bytes([0x80 | length])
+    elif length < 65536:
+        header += bytes([0x80 | 126]) + struct.pack("!H", length)
+    else:
+        header += bytes([0x80 | 127]) + struct.pack("!Q", length)
+    sock.sendall(header + mask + masked)
+
+
+def ws_recv_text(sock, timeout=OUTPUT_TIMEOUT_SECONDS):
+    """Read WebSocket text frames until timeout, returning accumulated text."""
+    sock.settimeout(timeout)
+    collected = ""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            header = sock.recv(2)
+        except socket.timeout:
+            break
+        if len(header) < 2:
+            break
+        opcode = header[0] & 0x0F
+        length = header[1] & 0x7F
+        if length == 126:
+            length = struct.unpack("!H", sock.recv(2))[0]
+        elif length == 127:
+            length = struct.unpack("!Q", sock.recv(8))[0]
+        payload = b""
+        while len(payload) < length:
+            chunk = sock.recv(length - len(payload))
+            if not chunk:
+                break
+            payload += chunk
+        if opcode == 0x1:
+            collected += payload.decode("utf-8", errors="replace")
+        elif opcode == 0x8:
+            break
+    return collected
+
+
+def test_websocket_streams_terminal_io(terminal_server):
+    server, port = terminal_server
+    base_url = f"http://{server.host}:{port}"
+
+    _, session_payload = http_request(f"{base_url}/api/sessions", method="POST")
+    session_id = session_payload["session_id"]
+
+    sock = ws_connect(server.host, port, f"/api/sessions/{session_id}/ws")
+    try:
+        ws_send_text(sock, "printf '__WS_OK__\\n'\n")
+        deadline = time.time() + OUTPUT_TIMEOUT_SECONDS
+        collected = ""
+        while time.time() < deadline:
+            chunk = ws_recv_text(sock, timeout=1.0)
+            collected += chunk
+            if "__WS_OK__" in collected:
+                break
+        assert "__WS_OK__" in collected
+    finally:
+        sock.close()
+
+
+def test_client_html_uses_websocket(terminal_server):
     server, port = terminal_server
     status, body = http_request(f"http://{server.host}:{port}/")
 
     assert status == 200
-    assert 'let localEchoBuffer = "";' in body
-    assert "function consumeLocalEcho(data)" in body
-    assert "terminal.write(consumeLocalEcho(payload.data))" in body
+    assert "function openWebSocket(" in body
+    assert "socket.onmessage" in body
+    assert "socket.onclose" in body

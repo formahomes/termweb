@@ -803,7 +803,7 @@ class TerminalSession:
         fcntl.ioctl(self._master_fd, termios.TIOCSWINSZ, size)
 
 
-WS_MAGIC = "258EAFA5-E914-47DA-95CA-5AB5A60AD65C"
+WS_MAGIC = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 WS_OP_TEXT = 0x1
 WS_OP_CLOSE = 0x8
 WS_OP_PING = 0x9

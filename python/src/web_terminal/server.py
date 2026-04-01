@@ -1057,7 +1057,11 @@ class TerminalRequestHandler(BaseHTTPRequestHandler):
             "\r\n"
         )
         self.connection.sendall(response.encode())
-        ws_relay(self.connection, self.rfile, session)
+        reader = self.connection.makefile("rb", 0)
+        try:
+            ws_relay(self.connection, reader, session)
+        finally:
+            reader.close()
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)

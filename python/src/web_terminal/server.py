@@ -9,6 +9,7 @@ import os
 import pty
 import select
 import signal
+import socket
 import subprocess
 import termios
 import threading
@@ -856,14 +857,17 @@ def ws_send_frame(sock, opcode: int, payload: bytes) -> None:
     sock.sendall(header + payload)
 
 
-def _ws_read_exact(reader, count: int) -> Optional[bytes]:
-    """Read exactly count bytes from a file-like reader, or return None on EOF."""
-    try:
-        buf = reader.read(count)
-    except OSError:
-        return None
-    if buf is None or len(buf) < count:
-        return None
+def _ws_read_exact(sock, count: int) -> Optional[bytes]:
+    """Read exactly count bytes from a socket, or return None on EOF."""
+    buf = b""
+    while len(buf) < count:
+        try:
+            chunk = sock.recv(count - len(buf))
+        except OSError:
+            return None
+        if not chunk:
+            return None
+        buf += chunk
     return buf
 
 
@@ -1056,12 +1060,15 @@ class TerminalRequestHandler(BaseHTTPRequestHandler):
             f"Sec-WebSocket-Accept: {accept}\r\n"
             "\r\n"
         )
-        self.connection.sendall(response.encode())
-        reader = self.connection.makefile("rb", 0)
+        self.wfile.write(response.encode())
+        self.wfile.flush()
+        ws_sock = socket.fromfd(
+            os.dup(self.connection.fileno()), self.connection.family, self.connection.type
+        )
         try:
-            ws_relay(self.connection, reader, session)
+            ws_relay(ws_sock, ws_sock, session)
         finally:
-            reader.close()
+            ws_sock.close()
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)

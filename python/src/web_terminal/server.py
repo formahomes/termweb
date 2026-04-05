@@ -856,6 +856,7 @@ DASHBOARD_PAGE = """<!DOCTYPE html>
       }
 
       .session-card__status.is-closed { background: #f87171; }
+      .session-card__status.is-processing { background: #facc15; }
 
       .session-card__close {
         background: none;
@@ -1244,9 +1245,14 @@ DASHBOARD_PAGE = """<!DOCTYPE html>
 
           const labelLeft = document.createElement("span");
           const statusDot = document.createElement("span");
-          statusDot.className = "session-card__status" + (session.closed ? " is-closed" : "");
+          var dotClass = "session-card__status";
+          if (session.closed) dotClass += " is-closed";
+          else if (session.status === "processing") dotClass += " is-processing";
+          statusDot.className = dotClass;
           labelLeft.appendChild(statusDot);
-          labelLeft.appendChild(document.createTextNode(" " + session.label));
+          var labelText = session.label;
+          if (session.status === "processing") labelText += " (processing…)";
+          labelLeft.appendChild(document.createTextNode(" " + labelText));
           labelRow.appendChild(labelLeft);
 
           const closeBtn = document.createElement("button");

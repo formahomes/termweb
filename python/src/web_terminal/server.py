@@ -6,12 +6,10 @@ import base64
 import hashlib
 import json
 import os
-import pty
 import select
 import shutil
 import socket
 import subprocess
-import termios
 import threading
 import time
 import uuid
@@ -20,12 +18,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Dict, Optional
 from urllib.parse import parse_qs, urlparse
-
-try:
-    import fcntl
-    import struct
-except ImportError as error:
-    raise RuntimeError("Terminal resizing requires fcntl and struct support") from error
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
@@ -186,9 +178,14 @@ TERMINAL_PAGE = """<!DOCTYPE html>
 
       #terminal {
         width: 100%;
-        flex: 1 1 auto;
+        flex: 1 1 0;
         min-height: 0;
         overflow: hidden;
+        position: relative;
+      }
+
+      #terminal .xterm {
+        height: 100%;
       }
     </style>
   </head>
@@ -666,7 +663,7 @@ TERMINAL_PAGE = """<!DOCTYPE html>
 
 
 class TerminalSession:
-    """A single tmux-backed shell session with a PTY attachment for I/O."""
+    """A single tmux-backed shell session using pipe-pane for output and send-keys for input."""
 
     def __init__(self, shell: str, cwd: str, cols: int, rows: int,
                  session_id: Optional[str] = None):
@@ -682,7 +679,7 @@ class TerminalSession:
         self._output_ready = threading.Condition(self._lock)
         self._tmux_name = TMUX_SESSION_PREFIX + self.session_id
         self._create_tmux_session(shell, cwd, cols, rows)
-        self._attach(cols, rows)
+        self._start_output_pipe()
 
     @classmethod
     def recover(cls, session_id: str, shell: str, cwd: str) -> "TerminalSession":
@@ -698,7 +695,8 @@ class TerminalSession:
         obj._output_ready = threading.Condition(obj._lock)
         obj._tmux_name = TMUX_SESSION_PREFIX + session_id
         info = subprocess.run(
-            [TMUX_BIN, "display-message", "-t", obj._tmux_name, "-p", "#{window_width} #{window_height}"],
+            [TMUX_BIN, "display-message", "-t", obj._tmux_name, "-p",
+             "#{window_width} #{window_height}"],
             capture_output=True, text=True,
         )
         if info.returncode == 0:
@@ -708,42 +706,44 @@ class TerminalSession:
         else:
             obj.cols = DEFAULT_COLS
             obj.rows = DEFAULT_ROWS
-        obj._attach(obj.cols, obj.rows)
+        obj._start_output_pipe()
         return obj
 
     def _create_tmux_session(self, shell: str, cwd: str, cols: int, rows: int) -> None:
         """Create a detached tmux session."""
+        env = os.environ.copy()
+        env["PATH"] = (
+            "/opt/homebrew/bin:/opt/homebrew/sbin:"
+            "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        )
+        env.setdefault("HOME", str(Path.home()))
+        env.setdefault("TERM", "xterm-256color")
+        env.setdefault("LANG", "en_US.UTF-8")
+        env.setdefault("LC_ALL", "en_US.UTF-8")
         subprocess.run(
             [TMUX_BIN, "new-session", "-d",
              "-s", self._tmux_name,
              "-x", str(cols), "-y", str(rows),
              shell],
             cwd=cwd,
+            env=env,
             check=True,
         )
 
-    def _attach(self, cols: int, rows: int) -> None:
-        """Open a PTY running tmux attach and start the output reader."""
-        self._master_fd, slave_fd = pty.openpty()
-        size = struct.pack("HHHH", rows, cols, 0, 0)
-        fcntl.ioctl(self._master_fd, termios.TIOCSWINSZ, size)
-        env = os.environ.copy()
-        env.setdefault("TERM", "xterm-256color")
-        env.setdefault("LANG", "en_US.UTF-8")
-        env.setdefault("LC_ALL", "en_US.UTF-8")
-        def configure_child_terminal() -> None:
-            os.setsid()
-            fcntl.ioctl(0, termios.TIOCSCTTY, 0)
-        self._process = subprocess.Popen(
-            [TMUX_BIN, "attach-session", "-t", self._tmux_name],
-            stdin=slave_fd,
-            stdout=slave_fd,
-            stderr=slave_fd,
-            env=env,
-            close_fds=True,
-            preexec_fn=configure_child_terminal,
+    def _start_output_pipe(self) -> None:
+        """Set up a named pipe to stream pane output."""
+        self._fifo_path = f"/tmp/termweb-{self.session_id}.pipe"
+        try:
+            os.mkfifo(self._fifo_path)
+        except FileExistsError:
+            os.unlink(self._fifo_path)
+            os.mkfifo(self._fifo_path)
+        self._fifo_fd = os.open(self._fifo_path, os.O_RDONLY | os.O_NONBLOCK)
+        subprocess.run(
+            [TMUX_BIN, "pipe-pane", "-O", "-t", self._tmux_name,
+             f"cat > {self._fifo_path}"],
+            check=True,
         )
-        os.close(slave_fd)
         self._reader = threading.Thread(target=self._read_output, daemon=True)
         self._reader.start()
 
@@ -773,7 +773,11 @@ class TerminalSession:
         with self._lock:
             if self._closed:
                 raise RuntimeError("Session is closed")
-        os.write(self._master_fd, data.encode("utf-8"))
+        hex_args = " ".join(f"{b:02x}" for b in data.encode("utf-8"))
+        subprocess.run(
+            [TMUX_BIN, "send-keys", "-H", "-t", self._tmux_name] + hex_args.split(),
+            capture_output=True,
+        )
 
     def resize(self, cols: int, rows: int) -> Dict[str, int]:
         cols = max(int(cols), 20)
@@ -791,26 +795,24 @@ class TerminalSession:
         return {"cols": cols, "rows": rows}
 
     def detach(self) -> None:
-        """Close the PTY attachment but leave the tmux session running."""
+        """Stop output pipe but leave the tmux session running."""
         with self._output_ready:
             if self._closed:
                 return
             self._closed = True
             self._output_ready.notify_all()
+        subprocess.run(
+            [TMUX_BIN, "pipe-pane", "-t", self._tmux_name],
+            capture_output=True,
+        )
         try:
-            os.close(self._master_fd)
+            os.close(self._fifo_fd)
         except OSError:
             pass
-        if self._process.poll() is None:
-            try:
-                self._process.terminate()
-            except OSError:
-                pass
-            try:
-                self._process.wait(timeout=PROCESS_EXIT_TIMEOUT)
-            except subprocess.TimeoutExpired:
-                self._process.kill()
-                self._process.wait(timeout=PROCESS_EXIT_TIMEOUT)
+        try:
+            os.unlink(self._fifo_path)
+        except OSError:
+            pass
 
     def close(self) -> None:
         """Detach and kill the tmux session."""
@@ -833,22 +835,22 @@ class TerminalSession:
             }
 
     def _read_output(self) -> None:
+        """Read pane output from the named pipe."""
         try:
-            while True:
+            while not self._closed:
                 try:
-                    ready, _, _ = select.select([self._master_fd], [], [], 0.1)
-                except OSError:
+                    ready, _, _ = select.select([self._fifo_fd], [], [], 0.1)
+                except (OSError, ValueError):
                     break
                 if not ready:
-                    if self._process.poll() is not None:
-                        break
                     continue
                 try:
-                    chunk = os.read(self._master_fd, DEFAULT_READ_SIZE)
+                    chunk = os.read(self._fifo_fd, DEFAULT_READ_SIZE)
                 except OSError:
                     break
                 if not chunk:
-                    break
+                    time.sleep(0.05)
+                    continue
                 text = chunk.decode("utf-8", errors="replace")
                 with self._output_ready:
                     self._buffer += text

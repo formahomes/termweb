@@ -23,7 +23,10 @@ launchctl remove "$SERVICE_LABEL" >/dev/null 2>&1 || true
 STALE_PID="$(lsof -ti :"$PORT" 2>/dev/null || true)"
 if [[ -n "$STALE_PID" ]]; then
   kill $STALE_PID 2>/dev/null || true
-  sleep 0.5
+  for i in {1..10}; do
+    lsof -ti :"$PORT" >/dev/null 2>&1 || break
+    sleep 0.2
+  done
 fi
 
 : > "$STDOUT_LOG"

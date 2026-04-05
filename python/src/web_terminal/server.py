@@ -2180,7 +2180,7 @@ class TerminalRequestHandler(BaseHTTPRequestHandler):
             self._serve_sse()
             return
         if parsed.path == "/api/sounds/glass":
-            self._serve_sound("/System/Library/Sounds/Glass.aiff", "audio/aiff")
+            self._serve_sound_aiff_as_wav("/System/Library/Sounds/Glass.aiff")
             return
         if parsed.path.startswith("/api/sessions/") and parsed.path.endswith("/output"):
             session_id = parsed.path.split("/")[3]
@@ -2322,16 +2322,31 @@ class TerminalRequestHandler(BaseHTTPRequestHandler):
         finally:
             self.service.unregister_sse_client(q)
 
-    def _serve_sound(self, path: str, content_type: str) -> None:
-        """Serve a sound file from the local filesystem."""
-        try:
-            with open(path, "rb") as fh:
-                data = fh.read()
-        except FileNotFoundError:
-            self._send_error(HTTPStatus.NOT_FOUND, "Sound file not found")
-            return
+    _wav_cache: Dict[str, bytes] = {}
+
+    def _serve_sound_aiff_as_wav(self, path: str) -> None:
+        """Convert an AIFF file to WAV and serve it. Caches the result."""
+        if path in self._wav_cache:
+            data = self._wav_cache[path]
+        else:
+            import tempfile
+            tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+            tmp.close()
+            try:
+                subprocess.run(
+                    ["afconvert", path, tmp.name, "-d", "LEI16", "-f", "WAVE"],
+                    check=True, capture_output=True,
+                )
+                with open(tmp.name, "rb") as fh:
+                    data = fh.read()
+            except (FileNotFoundError, subprocess.CalledProcessError):
+                self._send_error(HTTPStatus.NOT_FOUND, "Sound file not found")
+                return
+            finally:
+                os.unlink(tmp.name)
+            self._wav_cache[path] = data
         self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Type", "audio/wav")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "public, max-age=86400")
         self.end_headers()

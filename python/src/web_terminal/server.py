@@ -220,9 +220,12 @@ TERMINAL_PAGE = """<!DOCTYPE html>
         position: relative;
       }
 
-      #terminal .xterm {
+      #terminal .xterm,
+      #terminal .xterm-viewport,
+      #terminal .xterm-screen {
         height: 100%;
         max-width: 100%;
+        overflow: hidden;
       }
     </style>
   </head>
@@ -427,12 +430,13 @@ TERMINAL_PAGE = """<!DOCTYPE html>
               fitAddon.fit();
               return;
             }
-            const width = Math.max(terminalNode.clientWidth - 16, 320);
-            const height = Math.max(terminalNode.clientHeight - 16, 160);
+            const width = Math.max(terminalNode.clientWidth - 16, 100);
+            const height = Math.max(terminalNode.clientHeight - 16, 100);
             const cols = Math.max(Math.floor(width / 9), 20);
             const rows = Math.max(Math.floor(height / 18), 8);
             terminal.resize(cols, rows);
           };
+          terminal.fit();
           terminal.clientName = fitAddon ? "xterm" : "xterm (manual sizing)";
           return terminal;
         }

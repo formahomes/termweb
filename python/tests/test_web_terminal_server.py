@@ -72,9 +72,20 @@ def terminal_server():
             break
         time.sleep(POLL_INTERVAL_SECONDS)
 
+    # Remember which sessions were recovered so we don't kill them on teardown
+    recovered_ids = {s["session_id"] for s in server.list_sessions()["sessions"]}
+
     yield server, port
 
-    server.close_all_sessions()
+    # Only close sessions created during this test, detach recovered ones
+    for session_info in server.list_sessions()["sessions"]:
+        sid = session_info["session_id"]
+        if sid not in recovered_ids:
+            try:
+                server.close_session(sid)
+            except KeyError:
+                pass
+    server.detach_all_sessions()
     server.shutdown()
     server_thread.join(timeout=OUTPUT_TIMEOUT_SECONDS)
 
@@ -462,6 +473,10 @@ def test_sessions_survive_server_restart(terminal_server):
         output_payload, _ = read_until(base_url2, session_id, "__RECOVERED__")
         assert "__RECOVERED__" in output_payload["data"]
     finally:
-        server2.close_all_sessions()
+        try:
+            server2.close_session(session_id)
+        except KeyError:
+            pass
+        server2.detach_all_sessions()
         server2.shutdown()
         server2_thread.join(timeout=OUTPUT_TIMEOUT_SECONDS)

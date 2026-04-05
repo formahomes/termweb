@@ -7,6 +7,7 @@ import json
 import os
 import socket
 import struct
+import subprocess
 import sys
 import threading
 import time
@@ -18,7 +19,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from web_terminal.server import DEFAULT_HOST, WS_MAGIC, WebTerminalServer
+from web_terminal.server import DEFAULT_HOST, TMUX_SESSION_PREFIX, WS_MAGIC, WebTerminalServer
 
 OUTPUT_TIMEOUT_SECONDS = 5.0
 POLL_INTERVAL_SECONDS = 0.05
@@ -73,6 +74,7 @@ def terminal_server():
 
     yield server, port
 
+    server.close_all_sessions()
     server.shutdown()
     server_thread.join(timeout=OUTPUT_TIMEOUT_SECONDS)
 
@@ -328,3 +330,77 @@ def test_client_html_uses_websocket(terminal_server):
     assert "function openWebSocket(" in body
     assert "socket.onmessage" in body
     assert "socket.onclose" in body
+
+
+def test_session_backed_by_tmux(terminal_server):
+    """Each session creates a tmux session with the expected prefix."""
+    server, port = terminal_server
+    base_url = f"http://{server.host}:{port}"
+
+    _, session_payload = http_request(f"{base_url}/api/sessions", method="POST")
+    session_id = session_payload["session_id"]
+
+    result = subprocess.run(
+        ["tmux", "list-sessions", "-F", "#{session_name}"],
+        capture_output=True, text=True,
+    )
+    tmux_sessions = result.stdout.strip().splitlines()
+    expected_name = TMUX_SESSION_PREFIX + session_id
+    assert expected_name in tmux_sessions
+
+
+def test_sessions_survive_server_restart(terminal_server):
+    """Sessions created by one server are recoverable by a new server."""
+    server, port = terminal_server
+    base_url = f"http://{server.host}:{port}"
+
+    _, session_payload = http_request(f"{base_url}/api/sessions", method="POST")
+    session_id = session_payload["session_id"]
+
+    # Send a marker command so we can verify state survives
+    http_request(
+        f"{base_url}/api/sessions/{session_id}/input",
+        method="POST",
+        payload={"data": "printf '__SURVIVE__\\n'\n"},
+    )
+    read_until(base_url, session_id, "__SURVIVE__")
+
+    # Shut down the first server (sessions should stay alive in tmux)
+    server.shutdown()
+
+    # Start a second server on a new port
+    port2 = get_free_port()
+    server2 = WebTerminalServer(
+        host=DEFAULT_HOST,
+        port=port2,
+        shell="/bin/sh",
+    )
+    server2_thread = threading.Thread(target=server2.serve_forever, daemon=True)
+    server2_thread.start()
+
+    deadline = time.time() + OUTPUT_TIMEOUT_SECONDS
+    while time.time() < deadline:
+        if server2.is_running():
+            break
+        time.sleep(POLL_INTERVAL_SECONDS)
+
+    try:
+        base_url2 = f"http://{server2.host}:{port2}"
+
+        # The old session should appear in the new server's session list
+        _, sessions_payload = http_request(f"{base_url2}/api/sessions")
+        recovered_ids = [s["session_id"] for s in sessions_payload["sessions"]]
+        assert session_id in recovered_ids
+
+        # Should be able to send new input to the recovered session
+        http_request(
+            f"{base_url2}/api/sessions/{session_id}/input",
+            method="POST",
+            payload={"data": "printf '__RECOVERED__\\n'\n"},
+        )
+        output_payload, _ = read_until(base_url2, session_id, "__RECOVERED__")
+        assert "__RECOVERED__" in output_payload["data"]
+    finally:
+        server2.close_all_sessions()
+        server2.shutdown()
+        server2_thread.join(timeout=OUTPUT_TIMEOUT_SECONDS)

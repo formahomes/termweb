@@ -8,7 +8,6 @@ import json
 import os
 import pty
 import select
-import signal
 import socket
 import subprocess
 import termios
@@ -29,12 +28,12 @@ except ImportError as error:
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
-DEFAULT_WS_PORT_OFFSET = 1
 DEFAULT_COLS = 120
 DEFAULT_ROWS = 32
 DEFAULT_OUTPUT_TIMEOUT = 0.25
 DEFAULT_READ_SIZE = 4096
 PROCESS_EXIT_TIMEOUT = 1.0
+TMUX_SESSION_PREFIX = "termweb-"
 TERMINAL_PAGE = """<!DOCTYPE html>
 <html lang="en">
   <head>
@@ -661,21 +660,67 @@ TERMINAL_PAGE = """<!DOCTYPE html>
 
 
 class TerminalSession:
-    """A single PTY-backed shell session."""
+    """A single tmux-backed shell session with a PTY attachment for I/O."""
 
-    def __init__(self, shell: str, cwd: str, cols: int, rows: int):
+    def __init__(self, shell: str, cwd: str, cols: int, rows: int,
+                 session_id: Optional[str] = None):
         self.shell = shell
         self.cwd = cwd
         self.cols = cols
         self.rows = rows
-        self.session_id = uuid.uuid4().hex
+        self.session_id = session_id or uuid.uuid4().hex
         self.created_at = time.time()
         self._buffer = ""
         self._closed = False
         self._lock = threading.Lock()
         self._output_ready = threading.Condition(self._lock)
+        self._tmux_name = TMUX_SESSION_PREFIX + self.session_id
+        self._create_tmux_session(shell, cwd, cols, rows)
+        self._attach(cols, rows)
+
+    @classmethod
+    def recover(cls, session_id: str, shell: str, cwd: str) -> "TerminalSession":
+        """Reattach to an existing tmux session without creating a new one."""
+        obj = cls.__new__(cls)
+        obj.shell = shell
+        obj.cwd = cwd
+        obj.session_id = session_id
+        obj.created_at = time.time()
+        obj._buffer = ""
+        obj._closed = False
+        obj._lock = threading.Lock()
+        obj._output_ready = threading.Condition(obj._lock)
+        obj._tmux_name = TMUX_SESSION_PREFIX + session_id
+        info = subprocess.run(
+            ["tmux", "display-message", "-t", obj._tmux_name, "-p", "#{window_width} #{window_height}"],
+            capture_output=True, text=True,
+        )
+        if info.returncode == 0:
+            parts = info.stdout.strip().split()
+            obj.cols = int(parts[0])
+            obj.rows = int(parts[1])
+        else:
+            obj.cols = DEFAULT_COLS
+            obj.rows = DEFAULT_ROWS
+        obj._attach(obj.cols, obj.rows)
+        return obj
+
+    def _create_tmux_session(self, shell: str, cwd: str, cols: int, rows: int) -> None:
+        """Create a detached tmux session."""
+        subprocess.run(
+            ["tmux", "new-session", "-d",
+             "-s", self._tmux_name,
+             "-x", str(cols), "-y", str(rows),
+             shell],
+            cwd=cwd,
+            check=True,
+        )
+
+    def _attach(self, cols: int, rows: int) -> None:
+        """Open a PTY running tmux attach and start the output reader."""
         self._master_fd, slave_fd = pty.openpty()
-        self._set_winsize(cols, rows)
+        size = struct.pack("HHHH", rows, cols, 0, 0)
+        fcntl.ioctl(self._master_fd, termios.TIOCSWINSZ, size)
         env = os.environ.copy()
         env.setdefault("TERM", "xterm-256color")
         env.setdefault("LANG", "en_US.UTF-8")
@@ -684,11 +729,10 @@ class TerminalSession:
             os.setsid()
             fcntl.ioctl(0, termios.TIOCSCTTY, 0)
         self._process = subprocess.Popen(
-            [shell],
+            ["tmux", "attach-session", "-t", self._tmux_name],
             stdin=slave_fd,
             stdout=slave_fd,
             stderr=slave_fd,
-            cwd=cwd,
             env=env,
             close_fds=True,
             preexec_fn=configure_child_terminal,
@@ -733,10 +777,15 @@ class TerminalSession:
                 raise RuntimeError("Session is closed")
             self.cols = cols
             self.rows = rows
-            self._set_winsize(cols, rows)
+        subprocess.run(
+            ["tmux", "resize-window", "-t", self._tmux_name,
+             "-x", str(cols), "-y", str(rows)],
+            capture_output=True,
+        )
         return {"cols": cols, "rows": rows}
 
-    def close(self) -> None:
+    def detach(self) -> None:
+        """Close the PTY attachment but leave the tmux session running."""
         with self._output_ready:
             if self._closed:
                 return
@@ -748,17 +797,22 @@ class TerminalSession:
             pass
         if self._process.poll() is None:
             try:
-                os.killpg(self._process.pid, signal.SIGTERM)
-            except OSError:
                 self._process.terminate()
+            except OSError:
+                pass
             try:
                 self._process.wait(timeout=PROCESS_EXIT_TIMEOUT)
             except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(self._process.pid, signal.SIGKILL)
-                except OSError:
-                    self._process.kill()
+                self._process.kill()
                 self._process.wait(timeout=PROCESS_EXIT_TIMEOUT)
+
+    def close(self) -> None:
+        """Detach and kill the tmux session."""
+        self.detach()
+        subprocess.run(
+            ["tmux", "kill-session", "-t", self._tmux_name],
+            capture_output=True,
+        )
 
     def info(self) -> Dict[str, object]:
         with self._lock:
@@ -797,10 +851,6 @@ class TerminalSession:
             with self._output_ready:
                 self._closed = True
                 self._output_ready.notify_all()
-
-    def _set_winsize(self, cols: int, rows: int) -> None:
-        size = struct.pack("HHHH", rows, cols, 0, 0)
-        fcntl.ioctl(self._master_fd, termios.TIOCSWINSZ, size)
 
 
 WS_MAGIC = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -968,25 +1018,6 @@ def ws_handle_connection(conn, service, data=None):
             pass
 
 
-def ws_serve_forever(host, port, service):
-    """Accept WebSocket connections on a dedicated socket."""
-    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind((host, port))
-    srv.listen(8)
-    try:
-        while True:
-            conn, _addr = srv.accept()
-            thread = threading.Thread(
-                target=ws_handle_connection, args=(conn, service), daemon=True
-            )
-            thread.start()
-    except OSError:
-        pass
-    finally:
-        srv.close()
-
-
 class WebTerminalServer:
     """Threaded HTTP server that exposes PTY-backed terminal sessions."""
 
@@ -1009,23 +1040,44 @@ class WebTerminalServer:
     def is_running(self) -> bool:
         return self._running
 
+    def _recover_sessions(self) -> None:
+        """Discover existing tmux sessions and reattach to them."""
+        result = subprocess.run(
+            ["tmux", "list-sessions", "-F", "#{session_name}"],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            return
+        prefix = TMUX_SESSION_PREFIX
+        for name in result.stdout.strip().splitlines():
+            if not name.startswith(prefix):
+                continue
+            session_id = name[len(prefix):]
+            if session_id in self._sessions:
+                continue
+            try:
+                session = TerminalSession.recover(
+                    session_id=session_id,
+                    shell=self.shell,
+                    cwd=self.cwd,
+                )
+                self._sessions[session_id] = session
+            except Exception:
+                pass
+
     def serve_forever(self) -> None:
         class TerminalHTTPServer(ThreadingHTTPServer):
             daemon_threads = True
 
+        self._recover_sessions()
         self._httpd = TerminalHTTPServer((self.host, self.port), TerminalRequestHandler)
         self._httpd.service = self
-        self.ws_port = self.port + DEFAULT_WS_PORT_OFFSET
-        ws_thread = threading.Thread(
-            target=ws_serve_forever, args=(self.host, self.ws_port, self), daemon=True
-        )
-        ws_thread.start()
         self._running = True
         try:
             self._httpd.serve_forever()
         finally:
             self._running = False
-            self.close_all_sessions()
+            self.detach_all_sessions()
             self._httpd.server_close()
 
     def shutdown(self) -> None:
@@ -1067,7 +1119,16 @@ class WebTerminalServer:
         session.close()
         return {"ok": True}
 
+    def detach_all_sessions(self) -> None:
+        """Detach all PTY attachments without killing tmux sessions."""
+        with self._sessions_lock:
+            sessions = list(self._sessions.values())
+            self._sessions.clear()
+        for session in sessions:
+            session.detach()
+
     def close_all_sessions(self) -> None:
+        """Kill all tmux sessions owned by this server."""
         with self._sessions_lock:
             sessions = list(self._sessions.values())
             self._sessions.clear()

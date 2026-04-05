@@ -5,6 +5,7 @@ Browser terminal service for remote shell access from a phone or browser.
 ## Requirements
 
 - `python3`
+- `tmux`
 - `launchctl`
 - macOS user session with access to `~/Library/LaunchAgents`
 

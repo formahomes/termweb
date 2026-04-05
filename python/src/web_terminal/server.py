@@ -1264,7 +1264,7 @@ DASHBOARD_PAGE = """<!DOCTYPE html>
           labelLeft.appendChild(statusDot);
           var labelText = " " + session.label;
           if (session.status === "processing") labelText += " (processing…)";
-          if (session.repo_path) labelText += " — " + session.repo_path.split("/").pop();
+          if (session.cwd) labelText += " — " + session.cwd.split("/").pop();
           const labelTextNode = document.createTextNode(labelText);
           labelLeft.appendChild(labelTextNode);
           labelLeft.addEventListener("dblclick", function(event) {
@@ -1762,22 +1762,34 @@ class TerminalSession:
             capture_output=True,
         )
 
+    def _current_pane_path(self) -> str:
+        """Query tmux for the current working directory of the pane."""
+        result = subprocess.run(
+            [TMUX_BIN, "display-message", "-t", self._tmux_name, "-p",
+             "#{pane_current_path}"],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+        return self.cwd
+
     def info(self) -> Dict[str, object]:
         with self._lock:
-            return {
-                "session_id": self.session_id,
-                "label": self.label,
-                "cols": self.cols,
-                "rows": self.rows,
-                "cwd": self.cwd,
-                "shell": self.shell,
-                "port": self.port,
-                "repo_path": self.repo_path,
-                "worktree_path": self.worktree_path,
-                "created_at": self.created_at,
-                "status": self.status,
-                "closed": self._closed,
-            }
+            closed = self._closed
+        return {
+            "session_id": self.session_id,
+            "label": self.label,
+            "cols": self.cols,
+            "rows": self.rows,
+            "cwd": self._current_pane_path() if not closed else self.cwd,
+            "shell": self.shell,
+            "port": self.port,
+            "repo_path": self.repo_path,
+            "worktree_path": self.worktree_path,
+            "created_at": self.created_at,
+            "status": self.status,
+            "closed": closed,
+        }
 
     def _read_output(self) -> None:
         """Read pane output from the named pipe."""

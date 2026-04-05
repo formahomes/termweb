@@ -977,6 +977,66 @@ DASHBOARD_PAGE = """<!DOCTYPE html>
       .suggestions__item.is-selected {
         background: var(--accent);
       }
+
+      .back-btn {
+        display: none;
+      }
+
+      @media (max-width: 640px) {
+        .dashboard {
+          grid-template-columns: 1fr;
+          grid-template-rows: minmax(0, 1fr);
+        }
+
+        .sidebar {
+          min-height: 0;
+        }
+
+        .main-panel { display: none; }
+
+        .dashboard.is-terminal-view .sidebar { display: none; }
+        .dashboard.is-terminal-view .main-panel { display: flex; }
+
+        .back-btn {
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
+          border: 1px solid var(--border);
+          background: rgba(17, 24, 45, 0.92);
+          color: var(--text);
+          border-radius: 999px;
+          padding: 6px 12px;
+          font: inherit;
+          font-size: 11px;
+          line-height: 1;
+          cursor: pointer;
+          margin-bottom: 4px;
+        }
+
+        .back-btn:hover { background: var(--accent); }
+
+        .terminal-container {
+          border-radius: 10px;
+        }
+
+        .key-btn {
+          padding: 8px 12px;
+          font-size: 12px;
+        }
+
+        .session-card {
+          padding: 12px 14px;
+        }
+
+        .session-card__label { font-size: 13px; }
+        .session-card__meta { font-size: 11px; }
+        .session-card__close { font-size: 18px; padding: 4px 6px; }
+
+        .btn {
+          padding: 8px 14px;
+          font-size: 12px;
+        }
+      }
     </style>
   </head>
   <body>
@@ -1006,6 +1066,7 @@ DASHBOARD_PAGE = """<!DOCTYPE html>
         <div class="session-list" id="session-list"></div>
       </aside>
       <div class="main-panel">
+        <button class="back-btn" id="back-to-sessions" type="button">&#8592; Sessions</button>
         <div class="terminal-container is-empty" id="terminal-container">
           <div id="session-terminal"></div>
         </div>
@@ -1037,6 +1098,8 @@ DASHBOARD_PAGE = """<!DOCTYPE html>
       const formCreateNode = document.getElementById("form-create");
       const formCancelNode = document.getElementById("form-cancel");
       const repoSuggestionsNode = document.getElementById("repo-suggestions");
+      const dashboardNode = document.querySelector(".dashboard");
+      const backBtnNode = document.getElementById("back-to-sessions");
       const keyButtons = Array.from(document.querySelectorAll("[data-key]"));
 
       let sessions = [];
@@ -1253,6 +1316,7 @@ DASHBOARD_PAGE = """<!DOCTYPE html>
           terminal.clear();
         }
         terminalContainerNode.classList.add("is-empty");
+        dashboardNode.classList.remove("is-terminal-view");
         renderSessionList();
       }
 
@@ -1266,6 +1330,7 @@ DASHBOARD_PAGE = """<!DOCTYPE html>
         createTerminal();
         if (terminal) terminal.clear();
         activeSessionId = sessionId;
+        dashboardNode.classList.add("is-terminal-view");
         renderSessionList();
 
         fitTerminal();
@@ -1322,6 +1387,12 @@ DASHBOARD_PAGE = """<!DOCTYPE html>
         connectToSession(payload.session_id);
       });
 
+      // --- Back button (mobile) ---
+
+      backBtnNode.addEventListener("click", function() {
+        disconnectTerminal();
+      });
+
       // --- Key buttons ---
 
       keyButtons.forEach(function(btn) {
@@ -1349,6 +1420,12 @@ DASHBOARD_PAGE = """<!DOCTYPE html>
       window.addEventListener("resize", function() {
         handleResize().catch(console.error);
       });
+
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener("resize", function() {
+          handleResize().catch(console.error);
+        });
+      }
 
       // --- Auto-refresh session list ---
 
@@ -1446,17 +1523,17 @@ class TerminalSession:
         env.setdefault("TERM", "xterm-256color")
         env.setdefault("LANG", "en_US.UTF-8")
         env.setdefault("LC_ALL", "en_US.UTF-8")
+        session_env = []
         if self.port is not None:
             env["TERMWEB_PORT"] = str(self.port)
-        subprocess.run(
-            [TMUX_BIN, "new-session", "-d",
-             "-s", self._tmux_name,
-             "-x", str(cols), "-y", str(rows),
-             shell],
-            cwd=cwd,
-            env=env,
-            check=True,
-        )
+            session_env.append(f"TERMWEB_PORT={self.port}")
+        cmd = [TMUX_BIN, "new-session", "-d",
+               "-s", self._tmux_name,
+               "-x", str(cols), "-y", str(rows)]
+        for kv in session_env:
+            cmd.extend(["-e", kv])
+        cmd.append(shell)
+        subprocess.run(cmd, cwd=cwd, env=env, check=True)
 
     def _start_output_pipe(self) -> None:
         """Set up a named pipe to stream pane output."""

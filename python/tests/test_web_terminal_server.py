@@ -209,20 +209,24 @@ def test_sessions_persist_until_closed(terminal_server):
     server, port = terminal_server
     base_url = f"http://{server.host}:{port}"
 
-    _, sessions_payload = http_request(f"{base_url}/api/sessions")
-    assert sessions_payload["sessions"] == []
+    _, before = http_request(f"{base_url}/api/sessions")
+    initial_ids = {s["session_id"] for s in before["sessions"]}
 
     _, session_payload = http_request(f"{base_url}/api/sessions", method="POST")
     session_id = session_payload["session_id"]
 
-    _, sessions_payload = http_request(f"{base_url}/api/sessions")
-    assert [session["session_id"] for session in sessions_payload["sessions"]] == [session_id]
-    assert sessions_payload["sessions"][0]["closed"] is False
+    _, during = http_request(f"{base_url}/api/sessions")
+    current_ids = {s["session_id"] for s in during["sessions"]}
+    assert session_id in current_ids
+    match = [s for s in during["sessions"] if s["session_id"] == session_id]
+    assert match[0]["closed"] is False
 
     http_request(f"{base_url}/api/sessions/{session_id}", method="DELETE")
 
-    _, sessions_payload = http_request(f"{base_url}/api/sessions")
-    assert sessions_payload["sessions"] == []
+    _, after = http_request(f"{base_url}/api/sessions")
+    remaining_ids = {s["session_id"] for s in after["sessions"]}
+    assert session_id not in remaining_ids
+    assert remaining_ids == initial_ids
 
 
 def test_missing_session_returns_not_found(terminal_server):

@@ -92,6 +92,7 @@ TERMINAL_PAGE = """<!DOCTYPE html>
       body {
         margin: 0;
         min-height: var(--app-height);
+        max-width: 100%;
         background:
           radial-gradient(circle at top, rgba(76, 112, 255, 0.18), transparent 30%),
           linear-gradient(180deg, #11162a 0%, var(--page) 65%);
@@ -107,7 +108,9 @@ TERMINAL_PAGE = """<!DOCTYPE html>
         height: var(--app-height);
         padding: 10px;
         gap: 8px;
-        width: min(100%, var(--app-width));
+        width: 100%;
+        max-width: var(--app-width);
+        overflow: hidden;
       }
 
       .shell__header {
@@ -173,6 +176,7 @@ TERMINAL_PAGE = """<!DOCTYPE html>
         display: flex;
         flex-direction: column;
         min-height: 0;
+        min-width: 0;
         padding: 8px;
         background: rgba(10, 15, 30, 0.94);
         border: 1px solid var(--border);
@@ -209,6 +213,7 @@ TERMINAL_PAGE = """<!DOCTYPE html>
 
       #terminal {
         width: 100%;
+        max-width: 100%;
         flex: 1 1 0;
         min-height: 0;
         overflow: hidden;
@@ -217,6 +222,7 @@ TERMINAL_PAGE = """<!DOCTYPE html>
 
       #terminal .xterm {
         height: 100%;
+        max-width: 100%;
       }
     </style>
   </head>

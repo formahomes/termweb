@@ -364,6 +364,30 @@ def test_session_backed_by_tmux(terminal_server):
     assert expected_name in tmux_sessions
 
 
+def test_tmux_session_has_termweb_env_vars(terminal_server):
+    """Tmux sessions have TERMWEB_SESSION_ID and TERMWEB_URL set."""
+    server, port = terminal_server
+    base_url = f"http://{server.host}:{port}"
+
+    _, session_payload = http_request(f"{base_url}/api/sessions", method="POST")
+    session_id = session_payload["session_id"]
+    tmux_name = TMUX_SESSION_PREFIX + session_id
+
+    result = subprocess.run(
+        ["tmux", "show-environment", "-t", tmux_name],
+        capture_output=True, text=True,
+    )
+    env_lines = result.stdout.strip().splitlines()
+    env_dict = {}
+    for line in env_lines:
+        if "=" in line:
+            key, _, value = line.partition("=")
+            env_dict[key] = value
+
+    assert env_dict.get("TERMWEB_SESSION_ID") == session_id
+    assert env_dict.get("TERMWEB_URL") == f"http://{server.host}:{port}"
+
+
 def test_session_creation_accepts_label(terminal_server):
     """Sessions can be created with a user-defined label."""
     server, port = terminal_server
@@ -462,6 +486,130 @@ def test_dashboard_page_served(terminal_server):
     assert "session-list" in body
     assert "session-terminal" in body
     assert "xterm" in body.lower()
+
+
+def test_notify_sets_session_status(terminal_server):
+    """POST /api/sessions/{id}/notify updates the session status field."""
+    server, port = terminal_server
+    base_url = f"http://{server.host}:{port}"
+
+    _, session_payload = http_request(f"{base_url}/api/sessions", method="POST")
+    session_id = session_payload["session_id"]
+
+    # Default status should be "idle"
+    _, sessions = http_request(f"{base_url}/api/sessions")
+    match = [s for s in sessions["sessions"] if s["session_id"] == session_id]
+    assert match[0]["status"] == "idle"
+
+    # Set to processing
+    status, resp = http_request(
+        f"{base_url}/api/sessions/{session_id}/notify",
+        method="POST",
+        payload={"event": "processing"},
+    )
+    assert status == 200
+    assert resp["ok"] is True
+
+    _, sessions = http_request(f"{base_url}/api/sessions")
+    match = [s for s in sessions["sessions"] if s["session_id"] == session_id]
+    assert match[0]["status"] == "processing"
+
+    # Set to done
+    http_request(
+        f"{base_url}/api/sessions/{session_id}/notify",
+        method="POST",
+        payload={"event": "done"},
+    )
+
+    _, sessions = http_request(f"{base_url}/api/sessions")
+    match = [s for s in sessions["sessions"] if s["session_id"] == session_id]
+    assert match[0]["status"] == "done"
+
+
+def test_notify_missing_session_returns_not_found(terminal_server):
+    """POST /api/sessions/{id}/notify returns 404 for unknown sessions."""
+    server, port = terminal_server
+    base_url = f"http://{server.host}:{port}"
+
+    with pytest.raises(urllib.error.HTTPError) as error:
+        http_request(
+            f"{base_url}/api/sessions/nonexistent/notify",
+            method="POST",
+            payload={"event": "done"},
+        )
+
+    assert error.value.code == 404
+
+
+def test_notify_invalid_event_returns_bad_request(terminal_server):
+    """POST /api/sessions/{id}/notify rejects unknown event types."""
+    server, port = terminal_server
+    base_url = f"http://{server.host}:{port}"
+
+    _, session_payload = http_request(f"{base_url}/api/sessions", method="POST")
+    session_id = session_payload["session_id"]
+
+    with pytest.raises(urllib.error.HTTPError) as error:
+        http_request(
+            f"{base_url}/api/sessions/{session_id}/notify",
+            method="POST",
+            payload={"event": "invalid_event"},
+        )
+
+    assert error.value.code == 400
+
+
+def test_sse_streams_notify_events(terminal_server):
+    """GET /api/events streams SSE events when sessions are notified."""
+    server, port = terminal_server
+    base_url = f"http://{server.host}:{port}"
+
+    _, session_payload = http_request(f"{base_url}/api/sessions", method="POST")
+    session_id = session_payload["session_id"]
+
+    # Connect to SSE endpoint in a background thread
+    sse_events = []
+    sse_connected = threading.Event()
+
+    def read_sse():
+        request = urllib.request.Request(f"{base_url}/api/events")
+        request.add_header("Accept", "text/event-stream")
+        try:
+            with urllib.request.urlopen(request, timeout=OUTPUT_TIMEOUT_SECONDS) as response:
+                sse_connected.set()
+                buffer = ""
+                while True:
+                    chunk = response.read(1).decode("utf-8")
+                    if not chunk:
+                        break
+                    buffer += chunk
+                    if "\n\n" in buffer:
+                        parts = buffer.split("\n\n")
+                        for part in parts[:-1]:
+                            if part.strip():
+                                sse_events.append(part)
+                        buffer = parts[-1]
+        except Exception:
+            sse_connected.set()
+
+    sse_thread = threading.Thread(target=read_sse, daemon=True)
+    sse_thread.start()
+    sse_connected.wait(timeout=OUTPUT_TIMEOUT_SECONDS)
+    time.sleep(0.2)  # Give SSE connection time to register
+
+    # Send a notify event
+    http_request(
+        f"{base_url}/api/sessions/{session_id}/notify",
+        method="POST",
+        payload={"event": "processing"},
+    )
+    time.sleep(0.5)
+
+    # Check that the SSE client received the event
+    assert len(sse_events) >= 1
+    last_event = sse_events[-1]
+    assert "processing" in last_event
+    assert session_id in last_event
 
 
 def test_sessions_survive_server_restart(terminal_server):

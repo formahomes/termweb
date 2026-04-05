@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json
 import os
+import queue
 import select
 import shutil
 import socket
@@ -742,6 +743,7 @@ DASHBOARD_PAGE = """<!DOCTYPE html>
         height: 100dvh;
         gap: 8px;
         padding: 10px;
+        overflow: hidden;
       }
 
       .sidebar {
@@ -749,6 +751,7 @@ DASHBOARD_PAGE = """<!DOCTYPE html>
         flex-direction: column;
         gap: 8px;
         min-height: 0;
+        overflow: hidden;
       }
 
       .sidebar__header {
@@ -760,6 +763,7 @@ DASHBOARD_PAGE = """<!DOCTYPE html>
         border: 1px solid var(--border);
         border-radius: 12px;
         backdrop-filter: blur(12px);
+        flex-shrink: 0;
       }
 
       .sidebar__title {
@@ -788,6 +792,7 @@ DASHBOARD_PAGE = """<!DOCTYPE html>
         display: flex;
         flex-direction: column;
         gap: 6px;
+        min-width: 0;
       }
 
       .session-card {
@@ -797,6 +802,7 @@ DASHBOARD_PAGE = """<!DOCTYPE html>
         border-radius: 10px;
         cursor: pointer;
         transition: border-color 0.15s, background 0.15s;
+        min-width: 0;
       }
 
       .session-card:hover { border-color: var(--accent-border); }
@@ -813,6 +819,14 @@ DASHBOARD_PAGE = """<!DOCTYPE html>
         display: flex;
         justify-content: space-between;
         align-items: center;
+        min-width: 0;
+      }
+
+      .session-card__label > span:first-child {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        min-width: 0;
       }
 
       .session-card__meta {
@@ -821,6 +835,9 @@ DASHBOARD_PAGE = """<!DOCTYPE html>
         display: flex;
         gap: 10px;
         flex-wrap: wrap;
+        overflow-wrap: break-word;
+        word-break: break-all;
+        min-width: 0;
       }
 
       .session-card__port a {
@@ -856,7 +873,9 @@ DASHBOARD_PAGE = """<!DOCTYPE html>
         display: flex;
         flex-direction: column;
         min-height: 0;
+        min-width: 0;
         gap: 8px;
+        overflow: hidden;
       }
 
       .terminal-container {
@@ -885,13 +904,14 @@ DASHBOARD_PAGE = """<!DOCTYPE html>
 
       #session-terminal {
         width: 100%;
+        max-width: 100%;
         flex: 1 1 0;
         min-height: 0;
         overflow: hidden;
         position: relative;
       }
 
-      #session-terminal .xterm { height: 100%; }
+      #session-terminal .xterm { height: 100%; width: 100%; }
 
       .terminal-bar {
         display: flex;
@@ -933,6 +953,7 @@ DASHBOARD_PAGE = """<!DOCTYPE html>
         background: rgba(17, 24, 45, 0.92);
         border: 1px solid var(--border);
         border-radius: 10px;
+        flex-shrink: 0;
       }
 
       .new-session-form.is-visible { display: flex; }
@@ -1467,7 +1488,8 @@ class TerminalSession:
     def __init__(self, shell: str, cwd: str, cols: int, rows: int,
                  session_id: Optional[str] = None, label: Optional[str] = None,
                  port: Optional[int] = None, repo_path: Optional[str] = None,
-                 worktree_path: Optional[str] = None):
+                 worktree_path: Optional[str] = None,
+                 server_url: Optional[str] = None):
         self.shell = shell
         self.cwd = cwd
         self.cols = cols
@@ -1477,7 +1499,9 @@ class TerminalSession:
         self.port = port
         self.repo_path = repo_path
         self.worktree_path = worktree_path
+        self.server_url = server_url
         self.created_at = time.time()
+        self.status = "idle"
         self._buffer = ""
         self._closed = False
         self._lock = threading.Lock()
@@ -1500,6 +1524,7 @@ class TerminalSession:
         obj.repo_path = None
         obj.worktree_path = None
         obj.created_at = time.time()
+        obj.status = "idle"
         obj._buffer = ""
         obj._closed = False
         obj._lock = threading.Lock()
@@ -1534,6 +1559,11 @@ class TerminalSession:
         env.setdefault("LANG", "en_US.UTF-8")
         env.setdefault("LC_ALL", "en_US.UTF-8")
         session_env = []
+        env["TERMWEB_SESSION_ID"] = self.session_id
+        session_env.append(f"TERMWEB_SESSION_ID={self.session_id}")
+        if self.server_url:
+            env["TERMWEB_URL"] = self.server_url
+            session_env.append(f"TERMWEB_URL={self.server_url}")
         if self.port is not None:
             env["TERMWEB_PORT"] = str(self.port)
             session_env.append(f"TERMWEB_PORT={self.port}")
@@ -1669,6 +1699,7 @@ class TerminalSession:
                 "repo_path": self.repo_path,
                 "worktree_path": self.worktree_path,
                 "created_at": self.created_at,
+                "status": self.status,
                 "closed": self._closed,
             }
 
@@ -1882,6 +1913,8 @@ class WebTerminalServer:
         self._running = False
         self._sessions: Dict[str, TerminalSession] = {}
         self._sessions_lock = threading.Lock()
+        self._sse_clients: list = []
+        self._sse_lock = threading.Lock()
 
     def is_running(self) -> bool:
         return self._running
@@ -1971,6 +2004,7 @@ class WebTerminalServer:
             port=port,
             repo_path=repo_path,
             worktree_path=worktree_path,
+            server_url=f"http://{self.host}:{self.port}",
         )
         with self._sessions_lock:
             self._sessions[session.session_id] = session
@@ -2022,6 +2056,46 @@ class WebTerminalServer:
             self._sessions.clear()
         for session in sessions:
             session.close()
+
+    VALID_NOTIFY_EVENTS = {"processing", "done", "idle"}
+
+    def notify_session(self, session_id: str, event: str) -> Dict[str, object]:
+        """Update a session's status and broadcast to SSE clients."""
+        if event not in self.VALID_NOTIFY_EVENTS:
+            raise ValueError(f"Invalid event: {event}")
+        session = self._get_session(session_id)
+        with session._lock:
+            session.status = event
+        self._broadcast_sse({"session_id": session_id, "event": event})
+        return {"ok": True}
+
+    def _broadcast_sse(self, data: dict) -> None:
+        """Send an event to all connected SSE clients."""
+        message = f"data: {json.dumps(data)}\n\n"
+        with self._sse_lock:
+            dead = []
+            for queue in self._sse_clients:
+                try:
+                    queue.put_nowait(message)
+                except Exception:
+                    dead.append(queue)
+            for queue in dead:
+                self._sse_clients.remove(queue)
+
+    def register_sse_client(self):
+        """Register a new SSE client and return its event queue."""
+        q = queue.Queue()
+        with self._sse_lock:
+            self._sse_clients.append(q)
+        return q
+
+    def unregister_sse_client(self, q) -> None:
+        """Remove an SSE client queue."""
+        with self._sse_lock:
+            try:
+                self._sse_clients.remove(q)
+            except ValueError:
+                pass
 
     def _get_session(self, session_id: str) -> TerminalSession:
         with self._sessions_lock:
@@ -2088,6 +2162,9 @@ class TerminalRequestHandler(BaseHTTPRequestHandler):
             prefix = query.get("prefix", [""])[0]
             self._send_json(list_directories(prefix))
             return
+        if parsed.path == "/api/events":
+            self._serve_sse()
+            return
         if parsed.path.startswith("/api/sessions/") and parsed.path.endswith("/output"):
             session_id = parsed.path.split("/")[3]
             query = parse_qs(parsed.query)
@@ -2135,6 +2212,20 @@ class TerminalRequestHandler(BaseHTTPRequestHandler):
                 )
             except KeyError:
                 self._send_error(HTTPStatus.NOT_FOUND, "Session not found")
+                return
+            self._send_json(response)
+            return
+        if parsed.path.startswith("/api/sessions/") and parsed.path.endswith("/notify"):
+            session_id = parsed.path.split("/")[3]
+            payload = self._read_json()
+            event = payload.get("event", "")
+            try:
+                response = self.service.notify_session(session_id, event)
+            except KeyError:
+                self._send_error(HTTPStatus.NOT_FOUND, "Session not found")
+                return
+            except ValueError as exc:
+                self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
                 return
             self._send_json(response)
             return
@@ -2189,6 +2280,30 @@ class TerminalRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(body)
+
+    def _serve_sse(self) -> None:
+        """Stream Server-Sent Events to the client until disconnect."""
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        q = self.service.register_sse_client()
+        try:
+            while True:
+                try:
+                    message = q.get(timeout=30.0)
+                    self.wfile.write(message.encode("utf-8"))
+                    self.wfile.flush()
+                except queue.Empty:
+                    # Send keepalive comment
+                    self.wfile.write(b": keepalive\n\n")
+                    self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            self.service.unregister_sse_client(q)
 
     def _send_error(self, status: HTTPStatus, message: str) -> None:
         self._send_json({"error": message}, status=status)

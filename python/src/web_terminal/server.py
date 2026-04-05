@@ -1063,7 +1063,7 @@ class WebTerminalServer:
         self.host = host
         self.port = port
         self.shell = shell or os.environ.get("SHELL") or "/bin/sh"
-        self.cwd = cwd or str(Path.cwd())
+        self.cwd = cwd or str(Path.home())
         self._httpd: Optional[ThreadingHTTPServer] = None
         self._running = False
         self._sessions: Dict[str, TerminalSession] = {}

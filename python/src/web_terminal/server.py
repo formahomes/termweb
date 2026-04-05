@@ -8,6 +8,7 @@ import json
 import os
 import pty
 import select
+import shutil
 import socket
 import subprocess
 import termios
@@ -34,6 +35,11 @@ DEFAULT_OUTPUT_TIMEOUT = 0.25
 DEFAULT_READ_SIZE = 4096
 PROCESS_EXIT_TIMEOUT = 1.0
 TMUX_SESSION_PREFIX = "termweb-"
+TMUX_BIN = (
+    shutil.which("tmux")
+    or shutil.which("tmux", path="/opt/homebrew/bin:/usr/local/bin:/usr/bin")
+    or "tmux"
+)
 TERMINAL_PAGE = """<!DOCTYPE html>
 <html lang="en">
   <head>
@@ -692,7 +698,7 @@ class TerminalSession:
         obj._output_ready = threading.Condition(obj._lock)
         obj._tmux_name = TMUX_SESSION_PREFIX + session_id
         info = subprocess.run(
-            ["tmux", "display-message", "-t", obj._tmux_name, "-p", "#{window_width} #{window_height}"],
+            [TMUX_BIN, "display-message", "-t", obj._tmux_name, "-p", "#{window_width} #{window_height}"],
             capture_output=True, text=True,
         )
         if info.returncode == 0:
@@ -708,7 +714,7 @@ class TerminalSession:
     def _create_tmux_session(self, shell: str, cwd: str, cols: int, rows: int) -> None:
         """Create a detached tmux session."""
         subprocess.run(
-            ["tmux", "new-session", "-d",
+            [TMUX_BIN, "new-session", "-d",
              "-s", self._tmux_name,
              "-x", str(cols), "-y", str(rows),
              shell],
@@ -729,7 +735,7 @@ class TerminalSession:
             os.setsid()
             fcntl.ioctl(0, termios.TIOCSCTTY, 0)
         self._process = subprocess.Popen(
-            ["tmux", "attach-session", "-t", self._tmux_name],
+            [TMUX_BIN, "attach-session", "-t", self._tmux_name],
             stdin=slave_fd,
             stdout=slave_fd,
             stderr=slave_fd,
@@ -778,7 +784,7 @@ class TerminalSession:
             self.cols = cols
             self.rows = rows
         subprocess.run(
-            ["tmux", "resize-window", "-t", self._tmux_name,
+            [TMUX_BIN, "resize-window", "-t", self._tmux_name,
              "-x", str(cols), "-y", str(rows)],
             capture_output=True,
         )
@@ -810,7 +816,7 @@ class TerminalSession:
         """Detach and kill the tmux session."""
         self.detach()
         subprocess.run(
-            ["tmux", "kill-session", "-t", self._tmux_name],
+            [TMUX_BIN, "kill-session", "-t", self._tmux_name],
             capture_output=True,
         )
 
@@ -1043,7 +1049,7 @@ class WebTerminalServer:
     def _recover_sessions(self) -> None:
         """Discover existing tmux sessions and reattach to them."""
         result = subprocess.run(
-            ["tmux", "list-sessions", "-F", "#{session_name}"],
+            [TMUX_BIN, "list-sessions", "-F", "#{session_name}"],
             capture_output=True, text=True,
         )
         if result.returncode != 0:

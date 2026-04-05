@@ -12,12 +12,20 @@ STDOUT_LOG="/tmp/termweb-web-terminal.out"
 STDERR_LOG="/tmp/termweb-web-terminal.err"
 SERVICE_LABEL="com.termweb.web-terminal"
 PORT="8765"
-PYTHON_BIN="$(command -v python3)"
+PYTHON_BIN="${PYTHON_BIN:-/usr/local/bin/python3}"
 
 mkdir -p "$RUNTIME_DIR"
 cp "$PROJECT_ROOT/python/src/web_terminal/server.py" "$RUNTIME_FILE"
 
 launchctl remove "$SERVICE_LABEL" >/dev/null 2>&1 || true
+
+# Kill any process still holding the port from a previous run
+STALE_PID="$(lsof -ti :"$PORT" 2>/dev/null || true)"
+if [[ -n "$STALE_PID" ]]; then
+  kill $STALE_PID 2>/dev/null || true
+  sleep 0.5
+fi
+
 : > "$STDOUT_LOG"
 : > "$STDERR_LOG"
 

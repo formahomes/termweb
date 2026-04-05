@@ -1619,7 +1619,12 @@ class TerminalSession:
             [TMUX_BIN, "capture-pane", "-t", obj._tmux_name, "-p", "-e"],
             capture_output=True, text=True,
         )
-        obj._buffer = capture.stdout if capture.returncode == 0 else ""
+        if capture.returncode == 0 and capture.stdout:
+            # Convert \n to \r\n for xterm.js and strip trailing blank lines
+            lines = capture.stdout.rstrip("\n").split("\n")
+            obj._buffer = "\r\n".join(lines) + "\r\n"
+        else:
+            obj._buffer = ""
         obj._start_output_pipe()
         return obj
 

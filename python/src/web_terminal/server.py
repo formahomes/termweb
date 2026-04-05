@@ -26,6 +26,7 @@ DEFAULT_ROWS = 32
 DEFAULT_OUTPUT_TIMEOUT = 0.25
 DEFAULT_READ_SIZE = 4096
 PROCESS_EXIT_TIMEOUT = 1.0
+INPUT_BATCH_DELAY = 0.01
 TMUX_SESSION_PREFIX = "termweb-"
 TMUX_BIN = (
     shutil.which("tmux")
@@ -677,6 +678,8 @@ class TerminalSession:
         self._closed = False
         self._lock = threading.Lock()
         self._output_ready = threading.Condition(self._lock)
+        self._input_pending = ""
+        self._input_flusher = None
         self._tmux_name = TMUX_SESSION_PREFIX + self.session_id
         self._create_tmux_session(shell, cwd, cols, rows)
         self._start_output_pipe()
@@ -693,6 +696,8 @@ class TerminalSession:
         obj._closed = False
         obj._lock = threading.Lock()
         obj._output_ready = threading.Condition(obj._lock)
+        obj._input_pending = ""
+        obj._input_flusher = None
         obj._tmux_name = TMUX_SESSION_PREFIX + session_id
         info = subprocess.run(
             [TMUX_BIN, "display-message", "-t", obj._tmux_name, "-p",
@@ -773,6 +778,20 @@ class TerminalSession:
         with self._lock:
             if self._closed:
                 raise RuntimeError("Session is closed")
+            self._input_pending += data
+            if self._input_flusher is None:
+                self._input_flusher = threading.Timer(
+                    INPUT_BATCH_DELAY, self._flush_input)
+                self._input_flusher.start()
+
+    def _flush_input(self) -> None:
+        """Send accumulated keystrokes to tmux in one call."""
+        with self._lock:
+            data = self._input_pending
+            self._input_pending = ""
+            self._input_flusher = None
+        if not data:
+            return
         hex_args = " ".join(f"{b:02x}" for b in data.encode("utf-8"))
         subprocess.run(
             [TMUX_BIN, "send-keys", "-H", "-t", self._tmux_name] + hex_args.split(),
@@ -796,6 +815,11 @@ class TerminalSession:
 
     def detach(self) -> None:
         """Stop output pipe but leave the tmux session running."""
+        with self._lock:
+            if self._input_flusher is not None:
+                self._input_flusher.cancel()
+                self._input_flusher = None
+        self._flush_input()
         with self._output_ready:
             if self._closed:
                 return

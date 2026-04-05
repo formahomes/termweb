@@ -1596,7 +1596,6 @@ class TerminalSession:
         obj.worktree_path = None
         obj.created_at = time.time()
         obj.status = "idle"
-        obj._buffer = ""
         obj._closed = False
         obj._lock = threading.Lock()
         obj._output_ready = threading.Condition(obj._lock)
@@ -1615,6 +1614,12 @@ class TerminalSession:
         else:
             obj.cols = DEFAULT_COLS
             obj.rows = DEFAULT_ROWS
+        # Seed buffer with current pane content so clients see something immediately
+        capture = subprocess.run(
+            [TMUX_BIN, "capture-pane", "-t", obj._tmux_name, "-p", "-e"],
+            capture_output=True, text=True,
+        )
+        obj._buffer = capture.stdout if capture.returncode == 0 else ""
         obj._start_output_pipe()
         return obj
 

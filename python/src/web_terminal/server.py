@@ -1464,6 +1464,20 @@ DASHBOARD_PAGE = """<!DOCTYPE html>
         refreshSessions().catch(console.error);
       }, 5000);
 
+      // --- SSE notifications with audio ---
+
+      var notifySound = null;
+      var eventSource = new EventSource("/api/events");
+      eventSource.onmessage = function(event) {
+        var data = JSON.parse(event.data);
+        if (data.event === "done") {
+          if (!notifySound) notifySound = new Audio("/api/sounds/glass");
+          notifySound.currentTime = 0;
+          notifySound.play().catch(function() {});
+        }
+        refreshSessions().catch(console.error);
+      };
+
       // --- Initialize ---
 
       refreshSessions().catch(console.error);
@@ -2165,6 +2179,9 @@ class TerminalRequestHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/events":
             self._serve_sse()
             return
+        if parsed.path == "/api/sounds/glass":
+            self._serve_sound("/System/Library/Sounds/Glass.aiff", "audio/aiff")
+            return
         if parsed.path.startswith("/api/sessions/") and parsed.path.endswith("/output"):
             session_id = parsed.path.split("/")[3]
             query = parse_qs(parsed.query)
@@ -2304,6 +2321,21 @@ class TerminalRequestHandler(BaseHTTPRequestHandler):
             pass
         finally:
             self.service.unregister_sse_client(q)
+
+    def _serve_sound(self, path: str, content_type: str) -> None:
+        """Serve a sound file from the local filesystem."""
+        try:
+            with open(path, "rb") as fh:
+                data = fh.read()
+        except FileNotFoundError:
+            self._send_error(HTTPStatus.NOT_FOUND, "Sound file not found")
+            return
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "public, max-age=86400")
+        self.end_headers()
+        self.wfile.write(data)
 
     def _send_error(self, status: HTTPStatus, message: str) -> None:
         self._send_json({"error": message}, status=status)

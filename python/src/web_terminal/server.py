@@ -662,17 +662,625 @@ TERMINAL_PAGE = """<!DOCTYPE html>
 </html>
 """
 
+DASHBOARD_PAGE = """<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Saibai Dashboard</title>
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css"
+    />
+    <style>
+      :root {
+        color-scheme: dark;
+        --page: #0b1020;
+        --panel: #11182d;
+        --border: #24304e;
+        --text: #dbe5ff;
+        --muted: #8ea1c9;
+        --accent: rgba(76, 112, 255, 0.28);
+        --accent-border: rgba(154, 176, 255, 0.6);
+      }
+
+      * { box-sizing: border-box; margin: 0; }
+
+      body {
+        height: 100dvh;
+        background:
+          radial-gradient(circle at top, rgba(76, 112, 255, 0.18), transparent 30%),
+          linear-gradient(180deg, #11162a 0%, var(--page) 65%);
+        color: var(--text);
+        font-family: "SFMono-Regular", "Menlo", "Monaco", monospace;
+        overflow: hidden;
+      }
+
+      .dashboard {
+        display: grid;
+        grid-template-columns: 320px minmax(0, 1fr);
+        height: 100dvh;
+        gap: 8px;
+        padding: 10px;
+      }
+
+      .sidebar {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        min-height: 0;
+      }
+
+      .sidebar__header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 10px 12px;
+        background: rgba(17, 24, 45, 0.92);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        backdrop-filter: blur(12px);
+      }
+
+      .sidebar__title {
+        font-size: 11px;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+
+      .btn {
+        border: 1px solid var(--border);
+        background: rgba(17, 24, 45, 0.92);
+        color: var(--text);
+        border-radius: 999px;
+        padding: 6px 12px;
+        font: inherit;
+        font-size: 11px;
+        line-height: 1;
+        cursor: pointer;
+      }
+
+      .btn:hover { background: var(--accent); border-color: var(--accent-border); }
+
+      .session-list {
+        flex: 1;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+
+      .session-card {
+        padding: 10px 12px;
+        background: rgba(17, 24, 45, 0.92);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        cursor: pointer;
+        transition: border-color 0.15s, background 0.15s;
+      }
+
+      .session-card:hover { border-color: var(--accent-border); }
+
+      .session-card.is-active {
+        background: var(--accent);
+        border-color: var(--accent-border);
+      }
+
+      .session-card__label {
+        font-size: 12px;
+        font-weight: 600;
+        margin-bottom: 4px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+
+      .session-card__meta {
+        font-size: 10px;
+        color: var(--muted);
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+
+      .session-card__port a {
+        color: #7b9dff;
+        text-decoration: none;
+      }
+
+      .session-card__port a:hover { text-decoration: underline; }
+
+      .session-card__status {
+        display: inline-block;
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: #3ecf8e;
+      }
+
+      .session-card__status.is-closed { background: #f87171; }
+
+      .session-card__close {
+        background: none;
+        border: none;
+        color: var(--muted);
+        font-size: 14px;
+        cursor: pointer;
+        padding: 0 2px;
+        line-height: 1;
+      }
+
+      .session-card__close:hover { color: #f87171; }
+
+      .main-panel {
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        gap: 8px;
+      }
+
+      .terminal-container {
+        flex: 1;
+        min-height: 0;
+        padding: 8px;
+        background: rgba(10, 15, 30, 0.94);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .terminal-container.is-empty {
+        align-items: center;
+        justify-content: center;
+      }
+
+      .terminal-container.is-empty::after {
+        content: "Select or create a session";
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      #session-terminal {
+        width: 100%;
+        flex: 1 1 0;
+        min-height: 0;
+        overflow: hidden;
+        position: relative;
+      }
+
+      #session-terminal .xterm { height: 100%; }
+
+      .terminal-bar {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        padding: 6px 8px;
+        flex-wrap: wrap;
+      }
+
+      .terminal-bar__keys {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+
+      .key-btn {
+        border: 1px solid var(--border);
+        background: rgba(17, 24, 45, 0.92);
+        color: var(--text);
+        border-radius: 999px;
+        padding: 4px 8px;
+        font: inherit;
+        font-size: 10px;
+        line-height: 1;
+        cursor: pointer;
+      }
+
+      .key-btn.is-active {
+        background: var(--accent);
+        border-color: var(--accent-border);
+      }
+
+      /* New session form */
+      .new-session-form {
+        display: none;
+        flex-direction: column;
+        gap: 6px;
+        padding: 10px 12px;
+        background: rgba(17, 24, 45, 0.92);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+      }
+
+      .new-session-form.is-visible { display: flex; }
+
+      .new-session-form label {
+        font-size: 10px;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+
+      .new-session-form input {
+        border: 1px solid var(--border);
+        background: rgba(10, 15, 30, 0.94);
+        color: var(--text);
+        border-radius: 6px;
+        padding: 5px 8px;
+        font: inherit;
+        font-size: 11px;
+      }
+
+      .new-session-form__actions {
+        display: flex;
+        gap: 6px;
+        margin-top: 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="dashboard">
+      <aside class="sidebar">
+        <div class="sidebar__header">
+          <span class="sidebar__title">Sessions</span>
+          <button class="btn" id="toggle-new-form" type="button">+ New</button>
+        </div>
+        <div class="new-session-form" id="new-session-form">
+          <label>Label (optional)</label>
+          <input id="form-label" type="text" placeholder="my-feature" />
+          <label>Repository path (optional)</label>
+          <input id="form-repo" type="text" placeholder="/path/to/repo" />
+          <label>Branch (optional)</label>
+          <input id="form-branch" type="text" placeholder="feature/my-branch" />
+          <label>Port (optional)</label>
+          <input id="form-port" type="number" placeholder="3000" />
+          <div class="new-session-form__actions">
+            <button class="btn" id="form-create" type="button">Create</button>
+            <button class="btn" id="form-cancel" type="button">Cancel</button>
+          </div>
+        </div>
+        <div class="session-list" id="session-list"></div>
+      </aside>
+      <div class="main-panel">
+        <div class="terminal-container is-empty" id="terminal-container">
+          <div id="session-terminal"></div>
+        </div>
+        <div class="terminal-bar">
+          <div class="terminal-bar__keys">
+            <button class="key-btn" data-key="ctrl" type="button">Ctrl</button>
+            <button class="key-btn" data-key="esc" type="button">Esc</button>
+            <button class="key-btn" data-key="tab" type="button">Tab</button>
+            <button class="key-btn" data-key="up" type="button">Up</button>
+            <button class="key-btn" data-key="down" type="button">Down</button>
+            <button class="key-btn" data-key="left" type="button">Left</button>
+            <button class="key-btn" data-key="right" type="button">Right</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+    <script>
+      const sessionListNode = document.getElementById("session-list");
+      const terminalContainerNode = document.getElementById("terminal-container");
+      const terminalNode = document.getElementById("session-terminal");
+      const toggleFormNode = document.getElementById("toggle-new-form");
+      const formNode = document.getElementById("new-session-form");
+      const formLabelNode = document.getElementById("form-label");
+      const formRepoNode = document.getElementById("form-repo");
+      const formBranchNode = document.getElementById("form-branch");
+      const formPortNode = document.getElementById("form-port");
+      const formCreateNode = document.getElementById("form-create");
+      const formCancelNode = document.getElementById("form-cancel");
+      const keyButtons = Array.from(document.querySelectorAll("[data-key]"));
+
+      let sessions = [];
+      let activeSessionId = null;
+      let ws = null;
+      let terminal = null;
+      let fitAddon = null;
+      let ctrlArmed = false;
+      let refreshTimer = null;
+      const buttonInputs = {
+        esc: "\\x1b",
+        tab: "\\t",
+        up: "\\x1b[A",
+        down: "\\x1b[B",
+        left: "\\x1b[D",
+        right: "\\x1b[C"
+      };
+
+      async function sendJson(url, method, payload) {
+        const response = await fetch(url, {
+          method,
+          headers: { "Content-Type": "application/json" },
+          body: payload ? JSON.stringify(payload) : undefined
+        });
+        if (!response.ok) throw new Error("Request failed: " + response.status);
+        return response.json();
+      }
+
+      function sendInput(data) {
+        if (ws && ws.readyState === WebSocket.OPEN) ws.send(data);
+      }
+
+      function useCtrlModifier(data) {
+        if (!ctrlArmed || !data || data.length !== 1) return data;
+        ctrlArmed = false;
+        updateCtrlState();
+        const code = data.toUpperCase().charCodeAt(0);
+        if (code >= 64 && code <= 95) return String.fromCharCode(code - 64);
+        return data;
+      }
+
+      function updateCtrlState() {
+        keyButtons.forEach(function(btn) {
+          if (btn.dataset.key === "ctrl") btn.classList.toggle("is-active", ctrlArmed);
+        });
+      }
+
+      function formatTime(timestamp) {
+        const date = new Date(timestamp * 1000);
+        return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      }
+
+      // --- Session list rendering ---
+
+      function renderSessionList() {
+        sessionListNode.replaceChildren();
+        sessions.forEach(function(session) {
+          const card = document.createElement("div");
+          card.className = "session-card";
+          if (session.session_id === activeSessionId) card.className += " is-active";
+
+          const labelRow = document.createElement("div");
+          labelRow.className = "session-card__label";
+
+          const labelLeft = document.createElement("span");
+          const statusDot = document.createElement("span");
+          statusDot.className = "session-card__status" + (session.closed ? " is-closed" : "");
+          labelLeft.appendChild(statusDot);
+          labelLeft.appendChild(document.createTextNode(" " + session.label));
+          labelRow.appendChild(labelLeft);
+
+          const closeBtn = document.createElement("button");
+          closeBtn.className = "session-card__close";
+          closeBtn.textContent = "\\u00d7";
+          closeBtn.title = "Close session";
+          closeBtn.addEventListener("click", function(event) {
+            event.stopPropagation();
+            closeSession(session.session_id);
+          });
+          labelRow.appendChild(closeBtn);
+
+          const meta = document.createElement("div");
+          meta.className = "session-card__meta";
+          meta.innerHTML = formatTime(session.created_at);
+          if (session.port) {
+            const portSpan = document.createElement("span");
+            portSpan.className = "session-card__port";
+            const portLink = document.createElement("a");
+            portLink.href = window.location.protocol + "//" + window.location.hostname + ":" + session.port;
+            portLink.target = "_blank";
+            portLink.textContent = ":" + session.port;
+            portLink.addEventListener("click", function(event) { event.stopPropagation(); });
+            portSpan.appendChild(portLink);
+            meta.appendChild(portSpan);
+          }
+          if (session.worktree_path) {
+            const branchSpan = document.createElement("span");
+            branchSpan.textContent = session.worktree_path.split("/").pop();
+            meta.appendChild(branchSpan);
+          }
+
+          card.appendChild(labelRow);
+          card.appendChild(meta);
+
+          card.addEventListener("click", function() {
+            connectToSession(session.session_id);
+          });
+
+          sessionListNode.appendChild(card);
+        });
+      }
+
+      async function refreshSessions() {
+        const payload = await sendJson("/api/sessions", "GET");
+        sessions = payload.sessions;
+        renderSessionList();
+      }
+
+      async function closeSession(sessionId) {
+        await sendJson("/api/sessions/" + sessionId, "DELETE");
+        if (activeSessionId === sessionId) {
+          disconnectTerminal();
+        }
+        await refreshSessions();
+      }
+
+      // --- Terminal management ---
+
+      function createTerminal() {
+        if (terminal) return;
+        terminalContainerNode.classList.remove("is-empty");
+        if (typeof window.Terminal === "function") {
+          terminal = new Terminal({
+            cursorBlink: true,
+            fontSize: 12,
+            theme: {
+              background: "#0a0f1e",
+              foreground: "#dbe5ff",
+              cursor: "#9ab0ff",
+              black: "#101828",
+              brightBlack: "#51607b"
+            }
+          });
+          if (window.FitAddon && typeof window.FitAddon.FitAddon === "function") {
+            fitAddon = new FitAddon.FitAddon();
+            terminal.loadAddon(fitAddon);
+          }
+          terminal.open(terminalNode);
+          terminal.onData(function(data) {
+            if (activeSessionId) sendInput(useCtrlModifier(data));
+          });
+        }
+      }
+
+      function fitTerminal() {
+        if (fitAddon) fitAddon.fit();
+      }
+
+      function disconnectTerminal() {
+        if (ws) {
+          ws.onclose = null;
+          ws.close();
+          ws = null;
+        }
+        activeSessionId = null;
+        if (terminal) {
+          terminal.clear();
+        }
+        terminalContainerNode.classList.add("is-empty");
+        renderSessionList();
+      }
+
+      async function connectToSession(sessionId) {
+        if (activeSessionId === sessionId) return;
+        if (ws) {
+          ws.onclose = null;
+          ws.close();
+          ws = null;
+        }
+        createTerminal();
+        if (terminal) terminal.clear();
+        activeSessionId = sessionId;
+        renderSessionList();
+
+        fitTerminal();
+        const cols = terminal ? Math.max(terminal.cols, 20) : 120;
+        const rows = terminal ? Math.max(terminal.rows, 8) : 32;
+        await sendJson("/api/sessions/" + sessionId + "/resize", "POST", { cols, rows });
+
+        const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+        const url = protocol + "//" + window.location.host + "/api/sessions/" + sessionId + "/ws";
+        ws = new WebSocket(url);
+        ws.onmessage = function(event) {
+          if (terminal) terminal.write(event.data);
+        };
+        ws.onclose = function() {
+          if (activeSessionId === sessionId) {
+            if (terminal) {
+              terminal.writeln("");
+              terminal.writeln("[session disconnected]");
+            }
+            refreshSessions().catch(console.error);
+          }
+        };
+        ws.onerror = function(err) {
+          console.error("WebSocket error:", err);
+        };
+      }
+
+      // --- New session form ---
+
+      toggleFormNode.addEventListener("click", function() {
+        formNode.classList.toggle("is-visible");
+      });
+
+      formCancelNode.addEventListener("click", function() {
+        formNode.classList.remove("is-visible");
+      });
+
+      formCreateNode.addEventListener("click", async function() {
+        const body = {};
+        const label = formLabelNode.value.trim();
+        const repo = formRepoNode.value.trim();
+        const branch = formBranchNode.value.trim();
+        const port = formPortNode.value.trim();
+        if (label) body.label = label;
+        if (repo) body.repo_path = repo;
+        if (branch) body.branch = branch;
+        if (port) body.port = parseInt(port, 10);
+        const payload = await sendJson("/api/sessions", "POST", Object.keys(body).length ? body : undefined);
+        formLabelNode.value = "";
+        formBranchNode.value = "";
+        formPortNode.value = "";
+        formNode.classList.remove("is-visible");
+        await refreshSessions();
+        connectToSession(payload.session_id);
+      });
+
+      // --- Key buttons ---
+
+      keyButtons.forEach(function(btn) {
+        btn.addEventListener("click", function() {
+          const key = btn.dataset.key;
+          if (key === "ctrl") {
+            ctrlArmed = !ctrlArmed;
+            updateCtrlState();
+            return;
+          }
+          if (activeSessionId && buttonInputs[key]) sendInput(buttonInputs[key]);
+        });
+      });
+
+      // --- Resize handling ---
+
+      async function handleResize() {
+        if (!activeSessionId || !terminal) return;
+        fitTerminal();
+        const cols = Math.max(terminal.cols, 20);
+        const rows = Math.max(terminal.rows, 8);
+        await sendJson("/api/sessions/" + activeSessionId + "/resize", "POST", { cols, rows });
+      }
+
+      window.addEventListener("resize", function() {
+        handleResize().catch(console.error);
+      });
+
+      // --- Auto-refresh session list ---
+
+      refreshTimer = setInterval(function() {
+        refreshSessions().catch(console.error);
+      }, 5000);
+
+      // --- Initialize ---
+
+      refreshSessions().catch(console.error);
+    </script>
+  </body>
+</html>
+"""
+
 
 class TerminalSession:
     """A single tmux-backed shell session using pipe-pane for output and send-keys for input."""
 
+    _label_counter = 0
+    _label_counter_lock = threading.Lock()
+
+    @classmethod
+    def _next_label(cls) -> str:
+        with cls._label_counter_lock:
+            cls._label_counter += 1
+            return f"Session {cls._label_counter}"
+
     def __init__(self, shell: str, cwd: str, cols: int, rows: int,
-                 session_id: Optional[str] = None):
+                 session_id: Optional[str] = None, label: Optional[str] = None,
+                 port: Optional[int] = None, repo_path: Optional[str] = None,
+                 worktree_path: Optional[str] = None):
         self.shell = shell
         self.cwd = cwd
         self.cols = cols
         self.rows = rows
         self.session_id = session_id or uuid.uuid4().hex
+        self.label = label or self._next_label()
+        self.port = port
+        self.repo_path = repo_path
+        self.worktree_path = worktree_path
         self.created_at = time.time()
         self._buffer = ""
         self._closed = False
@@ -691,6 +1299,10 @@ class TerminalSession:
         obj.shell = shell
         obj.cwd = cwd
         obj.session_id = session_id
+        obj.label = cls._next_label()
+        obj.port = None
+        obj.repo_path = None
+        obj.worktree_path = None
         obj.created_at = time.time()
         obj._buffer = ""
         obj._closed = False
@@ -725,6 +1337,8 @@ class TerminalSession:
         env.setdefault("TERM", "xterm-256color")
         env.setdefault("LANG", "en_US.UTF-8")
         env.setdefault("LC_ALL", "en_US.UTF-8")
+        if self.port is not None:
+            env["TERMWEB_PORT"] = str(self.port)
         subprocess.run(
             [TMUX_BIN, "new-session", "-d",
              "-s", self._tmux_name,
@@ -850,10 +1464,14 @@ class TerminalSession:
         with self._lock:
             return {
                 "session_id": self.session_id,
+                "label": self.label,
                 "cols": self.cols,
                 "rows": self.rows,
                 "cwd": self.cwd,
                 "shell": self.shell,
+                "port": self.port,
+                "repo_path": self.repo_path,
+                "worktree_path": self.worktree_path,
                 "created_at": self.created_at,
                 "closed": self._closed,
             }
@@ -1116,12 +1734,36 @@ class WebTerminalServer:
         if self._httpd is not None:
             self._httpd.shutdown()
 
-    def create_session(self) -> Dict[str, object]:
+    def create_session(self, label: Optional[str] = None,
+                       port: Optional[int] = None,
+                       repo_path: Optional[str] = None,
+                       branch: Optional[str] = None) -> Dict[str, object]:
+        cwd = self.cwd
+        worktree_path = None
+        if repo_path and branch:
+            worktree_path = os.path.join(
+                repo_path, ".git", "termweb-worktrees", branch,
+            )
+            subprocess.run(
+                ["git", "-C", repo_path, "worktree", "add", worktree_path, "-b", branch],
+                capture_output=True, text=True,
+            )
+            if not os.path.isdir(worktree_path):
+                # Branch already exists — check it out instead of creating
+                subprocess.run(
+                    ["git", "-C", repo_path, "worktree", "add", worktree_path, branch],
+                    check=True, capture_output=True, text=True,
+                )
+            cwd = worktree_path
         session = TerminalSession(
             shell=self.shell,
-            cwd=self.cwd,
+            cwd=cwd,
             cols=DEFAULT_COLS,
             rows=DEFAULT_ROWS,
+            label=label,
+            port=port,
+            repo_path=repo_path,
+            worktree_path=worktree_path,
         )
         with self._sessions_lock:
             self._sessions[session.session_id] = session
@@ -1148,7 +1790,14 @@ class WebTerminalServer:
             session = self._sessions.pop(session_id, None)
         if session is None:
             raise KeyError(session_id)
+        repo_path = session.repo_path
+        worktree_path = session.worktree_path
         session.close()
+        if repo_path and worktree_path and os.path.isdir(worktree_path):
+            subprocess.run(
+                ["git", "-C", repo_path, "worktree", "remove", "--force", worktree_path],
+                capture_output=True, text=True,
+            )
         return {"ok": True}
 
     def detach_all_sessions(self) -> None:
@@ -1221,6 +1870,9 @@ class TerminalRequestHandler(BaseHTTPRequestHandler):
         if parsed.path == "/":
             self._send_html(TERMINAL_PAGE)
             return
+        if parsed.path == "/dashboard":
+            self._send_html(DASHBOARD_PAGE)
+            return
         if parsed.path == "/api/sessions":
             self._send_json(self.service.list_sessions())
             return
@@ -1241,7 +1893,13 @@ class TerminalRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/api/sessions":
-            payload = self.service.create_session()
+            body = self._read_json()
+            payload = self.service.create_session(
+                label=body.get("label"),
+                port=body.get("port"),
+                repo_path=body.get("repo_path"),
+                branch=body.get("branch"),
+            )
             self._send_json(payload, status=HTTPStatus.CREATED)
             return
         if parsed.path.startswith("/api/sessions/") and parsed.path.endswith("/input"):

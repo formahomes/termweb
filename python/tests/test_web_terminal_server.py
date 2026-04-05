@@ -349,6 +349,67 @@ def test_session_backed_by_tmux(terminal_server):
     assert expected_name in tmux_sessions
 
 
+def test_session_creation_accepts_label(terminal_server):
+    """Sessions can be created with a user-defined label."""
+    server, port = terminal_server
+    base_url = f"http://{server.host}:{port}"
+
+    _, payload = http_request(
+        f"{base_url}/api/sessions", method="POST",
+        payload={"label": "my-feature"},
+    )
+    session_id = payload["session_id"]
+    assert payload["label"] == "my-feature"
+
+    _, sessions = http_request(f"{base_url}/api/sessions")
+    match = [s for s in sessions["sessions"] if s["session_id"] == session_id]
+    assert len(match) == 1
+    assert match[0]["label"] == "my-feature"
+
+
+def test_session_creation_generates_label(terminal_server):
+    """Sessions without a label get an auto-generated one."""
+    server, port = terminal_server
+    base_url = f"http://{server.host}:{port}"
+
+    _, payload = http_request(f"{base_url}/api/sessions", method="POST")
+    assert "label" in payload
+    assert len(payload["label"]) > 0
+
+
+def test_session_creation_accepts_port(terminal_server):
+    """Sessions can be created with a port number exposed as TERMWEB_PORT env var."""
+    server, port = terminal_server
+    base_url = f"http://{server.host}:{port}"
+
+    _, payload = http_request(
+        f"{base_url}/api/sessions", method="POST",
+        payload={"port": 3001},
+    )
+    session_id = payload["session_id"]
+    assert payload["port"] == 3001
+
+    # Verify TERMWEB_PORT env var is available in the session
+    http_request(
+        f"{base_url}/api/sessions/{session_id}/input",
+        method="POST",
+        payload={"data": "printf 'PORT=%s\\n' \"$TERMWEB_PORT\"\n"},
+    )
+    output, _ = read_until(base_url, session_id, "PORT=3001")
+    assert "PORT=3001" in output["data"]
+
+
+def test_dashboard_page_served(terminal_server):
+    """GET /dashboard returns an HTML page with session management UI."""
+    server, port = terminal_server
+    status, body = http_request(f"http://{server.host}:{port}/dashboard")
+
+    assert status == 200
+    assert "session-list" in body
+    assert "session-terminal" in body
+    assert "xterm" in body.lower()
+
+
 def test_sessions_survive_server_restart(terminal_server):
     """Sessions created by one server are recoverable by a new server."""
     server, port = terminal_server

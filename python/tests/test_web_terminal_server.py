@@ -410,6 +410,45 @@ def test_session_creation_accepts_port(terminal_server):
     assert "PORT=3001" in output["data"]
 
 
+def test_session_auto_assigns_port_from_4000(terminal_server):
+    """Sessions without an explicit port get one auto-assigned starting at 4000."""
+    server, port = terminal_server
+    base_url = f"http://{server.host}:{port}"
+
+    _, payload1 = http_request(f"{base_url}/api/sessions", method="POST")
+    _, payload2 = http_request(f"{base_url}/api/sessions", method="POST")
+    assert payload1["port"] >= 4000
+    assert payload2["port"] >= 4000
+    assert payload1["port"] != payload2["port"]
+
+
+def test_session_explicit_port_skipped_by_auto(terminal_server):
+    """Auto-assignment skips ports already used by other sessions."""
+    server, port = terminal_server
+    base_url = f"http://{server.host}:{port}"
+
+    # Take port 4000 explicitly
+    _, payload1 = http_request(
+        f"{base_url}/api/sessions", method="POST",
+        payload={"port": 4000},
+    )
+    assert payload1["port"] == 4000
+
+    # Auto-assigned should skip 4000
+    _, payload2 = http_request(f"{base_url}/api/sessions", method="POST")
+    assert payload2["port"] >= 4001
+
+
+def test_directory_listing_endpoint(terminal_server):
+    """GET /api/paths returns subdirectories for a given prefix."""
+    server, port = terminal_server
+    base_url = f"http://{server.host}:{port}"
+
+    _, payload = http_request(f"{base_url}/api/paths?prefix=/tmp")
+    assert "paths" in payload
+    assert isinstance(payload["paths"], list)
+
+
 def test_dashboard_page_served(terminal_server):
     """GET /dashboard returns an HTML page with session management UI."""
     server, port = terminal_server

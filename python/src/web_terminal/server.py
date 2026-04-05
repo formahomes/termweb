@@ -27,12 +27,42 @@ DEFAULT_OUTPUT_TIMEOUT = 0.25
 DEFAULT_READ_SIZE = 4096
 PROCESS_EXIT_TIMEOUT = 1.0
 INPUT_BATCH_DELAY = 0.01
+SESSION_PORT_BASE = 4000
 TMUX_SESSION_PREFIX = "termweb-"
 TMUX_BIN = (
     shutil.which("tmux")
     or shutil.which("tmux", path="/opt/homebrew/bin:/usr/local/bin:/usr/bin")
     or "tmux"
 )
+def list_directories(prefix: str) -> Dict[str, list]:
+    """Return directories matching a path prefix for autocomplete."""
+    if not prefix:
+        return {"paths": []}
+    parent = Path(prefix)
+    if parent.is_dir():
+        # List children of this directory
+        try:
+            entries = sorted(
+                str(entry) for entry in parent.iterdir()
+                if entry.is_dir() and not entry.name.startswith(".")
+            )
+        except PermissionError:
+            entries = []
+    else:
+        # Prefix is partial — list siblings matching the prefix
+        parent_dir = parent.parent
+        partial = parent.name
+        try:
+            entries = sorted(
+                str(entry) for entry in parent_dir.iterdir()
+                if entry.is_dir() and entry.name.startswith(partial)
+                and not entry.name.startswith(".")
+            )
+        except (PermissionError, FileNotFoundError):
+            entries = []
+    return {"paths": entries[:50]}
+
+
 TERMINAL_PAGE = """<!DOCTYPE html>
 <html lang="en">
   <head>
@@ -919,6 +949,34 @@ DASHBOARD_PAGE = """<!DOCTYPE html>
         gap: 6px;
         margin-top: 4px;
       }
+
+      .suggestions {
+        position: absolute;
+        top: 100%;
+        left: 0;
+        right: 0;
+        max-height: 180px;
+        overflow-y: auto;
+        background: rgba(10, 15, 30, 0.98);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        z-index: 10;
+        margin-top: 2px;
+      }
+
+      .suggestions__item {
+        padding: 5px 8px;
+        font-size: 11px;
+        cursor: pointer;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .suggestions__item:hover,
+      .suggestions__item.is-selected {
+        background: var(--accent);
+      }
     </style>
   </head>
   <body>
@@ -932,11 +990,14 @@ DASHBOARD_PAGE = """<!DOCTYPE html>
           <label>Label (optional)</label>
           <input id="form-label" type="text" placeholder="my-feature" />
           <label>Repository path (optional)</label>
-          <input id="form-repo" type="text" placeholder="/path/to/repo" />
+          <div style="position:relative">
+            <input id="form-repo" type="text" placeholder="/path/to/repo" autocomplete="off" />
+            <div id="repo-suggestions" class="suggestions" hidden></div>
+          </div>
           <label>Branch (optional)</label>
           <input id="form-branch" type="text" placeholder="feature/my-branch" />
-          <label>Port (optional)</label>
-          <input id="form-port" type="number" placeholder="3000" />
+          <label>Port (auto-assigned)</label>
+          <input id="form-port" type="number" placeholder="4000" />
           <div class="new-session-form__actions">
             <button class="btn" id="form-create" type="button">Create</button>
             <button class="btn" id="form-cancel" type="button">Cancel</button>
@@ -975,6 +1036,7 @@ DASHBOARD_PAGE = """<!DOCTYPE html>
       const formPortNode = document.getElementById("form-port");
       const formCreateNode = document.getElementById("form-create");
       const formCancelNode = document.getElementById("form-cancel");
+      const repoSuggestionsNode = document.getElementById("repo-suggestions");
       const keyButtons = Array.from(document.querySelectorAll("[data-key]"));
 
       let sessions = [];
@@ -1026,6 +1088,53 @@ DASHBOARD_PAGE = """<!DOCTYPE html>
         const date = new Date(timestamp * 1000);
         return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
       }
+
+      // --- Repo path autocomplete ---
+
+      let repoDebounce = null;
+
+      function showRepoSuggestions(paths) {
+        repoSuggestionsNode.replaceChildren();
+        if (paths.length === 0) {
+          repoSuggestionsNode.hidden = true;
+          return;
+        }
+        paths.forEach(function(p) {
+          const item = document.createElement("div");
+          item.className = "suggestions__item";
+          item.textContent = p;
+          item.addEventListener("mousedown", function(event) {
+            event.preventDefault();
+            formRepoNode.value = p + "/";
+            repoSuggestionsNode.hidden = true;
+            formRepoNode.focus();
+            formRepoNode.dispatchEvent(new Event("input"));
+          });
+          repoSuggestionsNode.appendChild(item);
+        });
+        repoSuggestionsNode.hidden = false;
+      }
+
+      formRepoNode.addEventListener("input", function() {
+        clearTimeout(repoDebounce);
+        const value = formRepoNode.value;
+        if (!value || value.length < 2) {
+          repoSuggestionsNode.hidden = true;
+          return;
+        }
+        repoDebounce = setTimeout(async function() {
+          try {
+            const payload = await sendJson("/api/paths?prefix=" + encodeURIComponent(value), "GET");
+            showRepoSuggestions(payload.paths);
+          } catch (e) {
+            repoSuggestionsNode.hidden = true;
+          }
+        }, 150);
+      });
+
+      formRepoNode.addEventListener("blur", function() {
+        setTimeout(function() { repoSuggestionsNode.hidden = true; }, 200);
+      });
 
       // --- Session list rendering ---
 
@@ -1734,10 +1843,21 @@ class WebTerminalServer:
         if self._httpd is not None:
             self._httpd.shutdown()
 
+    def _next_port(self) -> int:
+        """Find the next available port starting from SESSION_PORT_BASE."""
+        with self._sessions_lock:
+            used = {s.port for s in self._sessions.values() if s.port is not None}
+        port = SESSION_PORT_BASE
+        while port in used:
+            port += 1
+        return port
+
     def create_session(self, label: Optional[str] = None,
                        port: Optional[int] = None,
                        repo_path: Optional[str] = None,
                        branch: Optional[str] = None) -> Dict[str, object]:
+        if port is None:
+            port = self._next_port()
         cwd = self.cwd
         worktree_path = None
         if repo_path and branch:
@@ -1875,6 +1995,11 @@ class TerminalRequestHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/sessions":
             self._send_json(self.service.list_sessions())
+            return
+        if parsed.path == "/api/paths":
+            query = parse_qs(parsed.query)
+            prefix = query.get("prefix", [""])[0]
+            self._send_json(list_directories(prefix))
             return
         if parsed.path.startswith("/api/sessions/") and parsed.path.endswith("/output"):
             session_id = parsed.path.split("/")[3]

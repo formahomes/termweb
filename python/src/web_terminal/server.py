@@ -1512,18 +1512,16 @@ DASHBOARD_PAGE = """<!DOCTYPE html>
       // --- SSE notifications with audio ---
 
       var notifySound = new Audio("/api/sounds/glass");
-      var audioUnlocked = false;
-      document.addEventListener("click", function() {
-        if (!audioUnlocked) {
-          notifySound.volume = 0;
-          notifySound.play().then(function() {
-            notifySound.pause();
-            notifySound.currentTime = 0;
-            notifySound.volume = 1;
-            audioUnlocked = true;
-          }).catch(function() {});
-        }
-      }, { once: true });
+      notifySound.load();
+      document.addEventListener("click", function unlockAudio() {
+        notifySound.volume = 0;
+        notifySound.play().then(function() {
+          notifySound.pause();
+          notifySound.currentTime = 0;
+          notifySound.volume = 1;
+          document.removeEventListener("click", unlockAudio);
+        }).catch(function() {});
+      });
 
       var eventSource = new EventSource("/api/events");
       eventSource.onmessage = function(event) {

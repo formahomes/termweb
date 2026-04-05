@@ -858,6 +858,18 @@ DASHBOARD_PAGE = """<!DOCTYPE html>
       .session-card__status.is-closed { background: #f87171; }
       .session-card__status.is-processing { background: #facc15; }
 
+      .session-card__rename {
+        background: rgba(10, 15, 30, 0.94);
+        border: 1px solid var(--accent-border);
+        color: var(--text);
+        font: inherit;
+        font-size: 11px;
+        border-radius: 4px;
+        padding: 1px 4px;
+        width: 100%;
+        outline: none;
+      }
+
       .session-card__close {
         background: none;
         border: none;
@@ -1250,9 +1262,36 @@ DASHBOARD_PAGE = """<!DOCTYPE html>
           else if (session.status === "processing") dotClass += " is-processing";
           statusDot.className = dotClass;
           labelLeft.appendChild(statusDot);
-          var labelText = session.label;
+          var labelText = " " + session.label;
           if (session.status === "processing") labelText += " (processing…)";
-          labelLeft.appendChild(document.createTextNode(" " + labelText));
+          if (session.repo_path) labelText += " — " + session.repo_path.split("/").pop();
+          const labelTextNode = document.createTextNode(labelText);
+          labelLeft.appendChild(labelTextNode);
+          labelLeft.addEventListener("dblclick", function(event) {
+            event.stopPropagation();
+            var input = document.createElement("input");
+            input.type = "text";
+            input.value = session.label;
+            input.className = "session-card__rename";
+            labelLeft.replaceChild(input, labelTextNode);
+            input.focus();
+            input.select();
+            function commit() {
+              var newLabel = input.value.trim();
+              if (newLabel && newLabel !== session.label) {
+                sendJson("/api/sessions/" + session.session_id + "/rename", "POST", { label: newLabel })
+                  .then(function() { refreshSessions(); })
+                  .catch(console.error);
+              } else {
+                renderSessionList();
+              }
+            }
+            input.addEventListener("keydown", function(e) {
+              if (e.key === "Enter") { e.preventDefault(); commit(); }
+              if (e.key === "Escape") { e.preventDefault(); renderSessionList(); }
+            });
+            input.addEventListener("blur", commit);
+          });
           labelRow.appendChild(labelLeft);
 
           const closeBtn = document.createElement("button");
@@ -1472,14 +1511,26 @@ DASHBOARD_PAGE = """<!DOCTYPE html>
 
       // --- SSE notifications with audio ---
 
-      var notifySound = null;
+      var notifySound = new Audio("/api/sounds/glass");
+      var audioUnlocked = false;
+      document.addEventListener("click", function() {
+        if (!audioUnlocked) {
+          notifySound.volume = 0;
+          notifySound.play().then(function() {
+            notifySound.pause();
+            notifySound.currentTime = 0;
+            notifySound.volume = 1;
+            audioUnlocked = true;
+          }).catch(function() {});
+        }
+      }, { once: true });
+
       var eventSource = new EventSource("/api/events");
       eventSource.onmessage = function(event) {
         var data = JSON.parse(event.data);
         if (data.event === "done") {
-          if (!notifySound) notifySound = new Audio("/api/sounds/glass");
           notifySound.currentTime = 0;
-          notifySound.play().catch(function() {});
+          notifySound.play().catch(function(e) { console.warn("audio play failed:", e); });
         }
         refreshSessions().catch(console.error);
       };
@@ -2043,6 +2094,15 @@ class WebTerminalServer:
         self._get_session(session_id).write(data)
         return {"ok": True}
 
+    def rename_session(self, session_id: str, label: str) -> Dict[str, object]:
+        """Rename a session's label."""
+        if not label:
+            raise ValueError("Label must not be empty")
+        session = self._get_session(session_id)
+        with session._lock:
+            session.label = label
+        return session.info()
+
     def resize_session(self, session_id: str, cols: int, rows: int) -> Dict[str, int]:
         return self._get_session(session_id).resize(cols=cols, rows=rows)
 
@@ -2235,6 +2295,20 @@ class TerminalRequestHandler(BaseHTTPRequestHandler):
                 )
             except KeyError:
                 self._send_error(HTTPStatus.NOT_FOUND, "Session not found")
+                return
+            self._send_json(response)
+            return
+        if parsed.path.startswith("/api/sessions/") and parsed.path.endswith("/rename"):
+            session_id = parsed.path.split("/")[3]
+            payload = self._read_json()
+            label = payload.get("label", "")
+            try:
+                response = self.service.rename_session(session_id, label)
+            except KeyError:
+                self._send_error(HTTPStatus.NOT_FOUND, "Session not found")
+                return
+            except ValueError as exc:
+                self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
                 return
             self._send_json(response)
             return

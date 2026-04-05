@@ -406,6 +406,61 @@ def test_session_creation_accepts_label(terminal_server):
     assert match[0]["label"] == "my-feature"
 
 
+def test_rename_session(terminal_server):
+    """POST /api/sessions/{id}/rename updates the session label."""
+    server, port = terminal_server
+    base_url = f"http://{server.host}:{port}"
+
+    _, payload = http_request(
+        f"{base_url}/api/sessions", method="POST",
+        payload={"label": "old-name"},
+    )
+    session_id = payload["session_id"]
+
+    status, resp = http_request(
+        f"{base_url}/api/sessions/{session_id}/rename",
+        method="POST",
+        payload={"label": "new-name"},
+    )
+    assert status == 200
+    assert resp["label"] == "new-name"
+
+    _, sessions = http_request(f"{base_url}/api/sessions")
+    match = [s for s in sessions["sessions"] if s["session_id"] == session_id]
+    assert match[0]["label"] == "new-name"
+
+
+def test_rename_missing_session_returns_not_found(terminal_server):
+    """POST /api/sessions/{id}/rename returns 404 for unknown sessions."""
+    server, port = terminal_server
+    base_url = f"http://{server.host}:{port}"
+
+    with pytest.raises(urllib.error.HTTPError) as error:
+        http_request(
+            f"{base_url}/api/sessions/nonexistent/rename",
+            method="POST",
+            payload={"label": "whatever"},
+        )
+    assert error.value.code == 404
+
+
+def test_rename_empty_label_returns_bad_request(terminal_server):
+    """POST /api/sessions/{id}/rename rejects empty labels."""
+    server, port = terminal_server
+    base_url = f"http://{server.host}:{port}"
+
+    _, payload = http_request(f"{base_url}/api/sessions", method="POST")
+    session_id = payload["session_id"]
+
+    with pytest.raises(urllib.error.HTTPError) as error:
+        http_request(
+            f"{base_url}/api/sessions/{session_id}/rename",
+            method="POST",
+            payload={"label": ""},
+        )
+    assert error.value.code == 400
+
+
 def test_session_creation_generates_label(terminal_server):
     """Sessions without a label get an auto-generated one."""
     server, port = terminal_server

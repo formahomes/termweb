@@ -1,0 +1,762 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Saibai Terminal</title>
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css"
+    />
+    <style>
+      :root {
+        color-scheme: dark;
+        --page: #0b1020;
+        --panel: #11182d;
+        --border: #24304e;
+        --text: #dbe5ff;
+        --muted: #8ea1c9;
+        --app-height: 100dvh;
+        --app-width: 100vw;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: var(--app-height);
+        max-width: 100%;
+        background:
+          radial-gradient(circle at top, rgba(76, 112, 255, 0.18), transparent 30%),
+          linear-gradient(180deg, #11162a 0%, var(--page) 65%);
+        color: var(--text);
+        font-family: "SFMono-Regular", "Menlo", "Monaco", monospace;
+        overflow: hidden;
+      }
+
+      .shell {
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr);
+        min-height: var(--app-height);
+        height: var(--app-height);
+        padding: 10px;
+        gap: 8px;
+        width: 100%;
+        max-width: var(--app-width);
+        overflow: hidden;
+      }
+
+      .shell__header {
+        display: grid;
+        gap: 8px;
+        padding: 8px 10px;
+        background: rgba(17, 24, 45, 0.92);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        backdrop-filter: blur(12px);
+      }
+
+      .shell__bar {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr) auto;
+        gap: 8px;
+        align-items: center;
+      }
+
+      .shell__title {
+        font-size: 11px;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+
+      .shell__status {
+        color: var(--muted);
+        font-size: 10px;
+        text-align: center;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .shell__menu {
+        display: grid;
+        gap: 8px;
+      }
+
+      .shell__menu[hidden] {
+        display: none;
+      }
+
+      .shell__controls {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+
+      .shell__select {
+        min-width: 132px;
+        border: 1px solid var(--border);
+        background: rgba(10, 15, 30, 0.94);
+        color: var(--text);
+        border-radius: 8px;
+        padding: 6px 8px;
+        font: inherit;
+        font-size: 11px;
+      }
+
+      .shell__terminal {
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        min-width: 0;
+        padding: 8px;
+        background: rgba(10, 15, 30, 0.94);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+        overflow: hidden;
+      }
+
+      .shell__keys {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+
+      .shell__key {
+        border: 1px solid var(--border);
+        background: rgba(17, 24, 45, 0.92);
+        color: var(--text);
+        border-radius: 999px;
+        padding: 6px 10px;
+        font: inherit;
+        font-size: 11px;
+        line-height: 1;
+      }
+
+      .shell__key.is-active {
+        background: rgba(76, 112, 255, 0.28);
+        border-color: rgba(154, 176, 255, 0.6);
+      }
+
+      .shell__key--menu {
+        min-width: 58px;
+      }
+
+      #terminal {
+        width: 100%;
+        max-width: 100%;
+        flex: 1 1 0;
+        min-height: 0;
+        overflow: hidden;
+        position: relative;
+      }
+
+      #terminal .xterm,
+      #terminal .xterm-viewport,
+      #terminal .xterm-screen {
+        height: 100%;
+        max-width: 100%;
+        overflow: hidden;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="shell__header">
+        <div class="shell__bar">
+          <div class="shell__title">Saibai Remote Terminal</div>
+          <div class="shell__status" id="status">Connecting…</div>
+          <button class="shell__key shell__key--menu" id="menu-toggle" type="button">Menu</button>
+        </div>
+        <div class="shell__menu" hidden>
+          <div class="shell__controls">
+            <select class="shell__select" id="session-picker"></select>
+            <button class="shell__key" id="connect-session" type="button">Connect</button>
+            <button class="shell__key" id="new-session" type="button">New</button>
+            <button class="shell__key" id="close-session" type="button">Close</button>
+            <button class="shell__key" id="full-history" type="button">History</button>
+          </div>
+          <div class="shell__keys">
+            <button class="shell__key" data-key="ctrl" type="button">Ctrl</button>
+            <button class="shell__key" data-key="esc" type="button">Esc</button>
+            <button class="shell__key" data-key="tab" type="button">Tab</button>
+            <button class="shell__key" data-key="up" type="button">Up</button>
+            <button class="shell__key" data-key="down" type="button">Down</button>
+            <button class="shell__key" data-key="left" type="button">Left</button>
+            <button class="shell__key" data-key="right" type="button">Right</button>
+          </div>
+        </div>
+      </header>
+      <section class="shell__terminal">
+        <div id="terminal"></div>
+      </section>
+    </main>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-canvas@0.7.0/lib/addon-canvas.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-image@0.8.0/lib/addon-image.min.js"></script>
+    <script>
+      const statusNode = document.getElementById("status");
+      const terminalNode = document.getElementById("terminal");
+      const menuToggleNode = document.getElementById("menu-toggle");
+      const menuPanelNode = document.querySelector(".shell__menu");
+      const sessionPickerNode = document.getElementById("session-picker");
+      const connectSessionNode = document.getElementById("connect-session");
+      const newSessionNode = document.getElementById("new-session");
+      const closeSessionNode = document.getElementById("close-session");
+      const fullHistoryNode = document.getElementById("full-history");
+      const keyButtons = Array.from(document.querySelectorAll("[data-key]"));
+      const SESSION_STORAGE_KEY = "saibai-terminal-session";
+      let sessionId = null;
+      let sessionList = [];
+      let ws = null;
+      let ctrlArmed = false;
+      let menuExpanded = false;
+      const buttonInputs = {
+        esc: "\x1b",
+        tab: "\t",
+        up: "\x1b[A",
+        down: "\x1b[B",
+        left: "\x1b[D",
+        right: "\x1b[C"
+      };
+
+      function setStatus(message) {
+        statusNode.textContent = message;
+      }
+
+      function setMenuExpanded(expanded) {
+        menuExpanded = expanded;
+        menuPanelNode.hidden = !expanded;
+        menuToggleNode.classList.toggle("is-active", expanded);
+        menuToggleNode.textContent = expanded ? "Hide" : "Menu";
+      }
+
+      function updateViewportMetrics() {
+        const viewport = window.visualViewport;
+        const height = viewport ? viewport.height : window.innerHeight;
+        const width = viewport ? viewport.width : window.innerWidth;
+        document.documentElement.style.setProperty("--app-height", height + "px");
+        document.documentElement.style.setProperty("--app-width", width + "px");
+      }
+
+      function createBasicTerminal() {
+        const outputNode = document.createElement("pre");
+        const inputNode = document.createElement("textarea");
+        outputNode.style.margin = "0";
+        outputNode.style.whiteSpace = "pre-wrap";
+        outputNode.style.wordBreak = "break-word";
+        outputNode.style.minHeight = "100%";
+        outputNode.style.color = "#dbe5ff";
+        outputNode.style.fontSize = "12px";
+        inputNode.setAttribute("aria-label", "Basic terminal input");
+        inputNode.style.position = "absolute";
+        inputNode.style.opacity = "0";
+        inputNode.style.pointerEvents = "none";
+        inputNode.style.height = "1px";
+        inputNode.style.width = "1px";
+        terminalNode.style.position = "relative";
+        terminalNode.style.overflow = "auto";
+        terminalNode.replaceChildren(outputNode, inputNode);
+
+        const listeners = [];
+        const terminal = {
+          cols: 120,
+          rows: 32,
+          open() {
+            outputNode.focus?.();
+          },
+          loadAddon() {},
+          write(data) {
+            outputNode.textContent += data;
+            terminalNode.scrollTop = terminalNode.scrollHeight;
+          },
+          writeln(data) {
+            terminal.write(data + "\n");
+          },
+          clear() {
+            outputNode.textContent = "";
+          },
+          onData(listener) {
+            listeners.push(listener);
+          },
+          fit() {
+            const width = Math.max(terminalNode.clientWidth - 16, 320);
+            const height = Math.max(terminalNode.clientHeight - 16, 160);
+            terminal.cols = Math.max(Math.floor(width / 9), 20);
+            terminal.rows = Math.max(Math.floor(height / 18), 8);
+          }
+        };
+
+        function emit(data) {
+          listeners.forEach((listener) => listener(data));
+        }
+
+        function focusInput() {
+          inputNode.focus();
+        }
+
+        terminalNode.addEventListener("mousedown", focusInput);
+        window.addEventListener("load", focusInput);
+
+        inputNode.addEventListener("input", () => {
+          if (inputNode.value) {
+            emit(inputNode.value);
+            inputNode.value = "";
+          }
+        });
+
+        inputNode.addEventListener("keydown", (event) => {
+          const keys = {
+            Enter: "\r",
+            Backspace: "\x7f",
+            Tab: "\t",
+            Escape: "\x1b",
+            ArrowUp: "\x1b[A",
+            ArrowDown: "\x1b[B",
+            ArrowRight: "\x1b[C",
+            ArrowLeft: "\x1b[D"
+          };
+          if (event.ctrlKey && event.key === "c") {
+            event.preventDefault();
+            emit("\x03");
+            return;
+          }
+          if (event.ctrlKey && event.key === "d") {
+            event.preventDefault();
+            emit("\x04");
+            return;
+          }
+          if (event.ctrlKey && event.key === "l") {
+            event.preventDefault();
+            emit("\x0c");
+            return;
+          }
+          if (keys[event.key]) {
+            event.preventDefault();
+            emit(keys[event.key]);
+          }
+        });
+
+        return terminal;
+      }
+
+      function createTerminal() {
+        if (typeof window.Terminal === "function") {
+          const terminal = new Terminal({
+            cursorBlink: true,
+            fontSize: 12,
+            theme: {
+              background: "#0a0f1e",
+              foreground: "#dbe5ff",
+              cursor: "#9ab0ff",
+              black: "#101828",
+              brightBlack: "#51607b"
+            }
+          });
+          let fitAddon = null;
+          if (window.FitAddon && typeof window.FitAddon.FitAddon === "function") {
+            fitAddon = new FitAddon.FitAddon();
+            terminal.loadAddon(fitAddon);
+          }
+          terminal.open(terminalNode);
+          if (window.CanvasAddon && typeof window.CanvasAddon.CanvasAddon === "function") {
+            try {
+              terminal.loadAddon(new CanvasAddon.CanvasAddon());
+            } catch (err) {
+              console.warn("canvas addon failed:", err);
+            }
+          }
+          if (window.ImageAddon && typeof window.ImageAddon.ImageAddon === "function") {
+            try {
+              terminal.loadAddon(new ImageAddon.ImageAddon());
+            } catch (err) {
+              console.warn("image addon failed:", err);
+            }
+          }
+          terminal.fit = () => {
+            if (fitAddon) {
+              fitAddon.fit();
+              return;
+            }
+            const width = Math.max(terminalNode.clientWidth - 16, 100);
+            const height = Math.max(terminalNode.clientHeight - 16, 100);
+            const cols = Math.max(Math.floor(width / 9), 20);
+            const rows = Math.max(Math.floor(height / 18), 8);
+            terminal.resize(cols, rows);
+          };
+          terminal.fit();
+          terminal.clientName = fitAddon ? "xterm" : "xterm (manual sizing)";
+          return terminal;
+        }
+        const terminal = createBasicTerminal();
+        terminal.open(terminalNode);
+        terminal.clientName = "basic terminal";
+        return terminal;
+      }
+
+      const terminal = createTerminal();
+      updateViewportMetrics();
+      setMenuExpanded(false);
+
+      async function sendJson(url, method, payload) {
+        const response = await fetch(url, {
+          method,
+          headers: { "Content-Type": "application/json" },
+          body: payload ? JSON.stringify(payload) : undefined
+        });
+        if (!response.ok) {
+          throw new Error("Request failed: " + response.status);
+        }
+        return await response.json();
+      }
+
+      function sendInput(data) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(data);
+        }
+      }
+
+      function setCtrlButtonState() {
+        keyButtons.forEach((button) => {
+          if (button.dataset.key === "ctrl") {
+            button.classList.toggle("is-active", ctrlArmed);
+          }
+        });
+      }
+
+      function useCtrlModifier(data) {
+        if (!ctrlArmed || !data || data.length !== 1) {
+          return data;
+        }
+        ctrlArmed = false;
+        setCtrlButtonState();
+        const code = data.toUpperCase().charCodeAt(0);
+        if (code >= 64 && code <= 95) {
+          return String.fromCharCode(code - 64);
+        }
+        return data;
+      }
+
+      async function listSessions() {
+        const payload = await sendJson("/api/sessions", "GET");
+        sessionList = payload.sessions;
+        renderSessionPicker();
+        return sessionList;
+      }
+
+      function renderSessionPicker() {
+        const selectedSessionId = sessionId || window.localStorage.getItem("saibai-terminal-session") || "";
+        sessionPickerNode.replaceChildren();
+        if (sessionList.length === 0) {
+          const option = document.createElement("option");
+          option.value = "";
+          option.textContent = "No sessions";
+          sessionPickerNode.appendChild(option);
+          sessionPickerNode.disabled = true;
+          return;
+        }
+        sessionPickerNode.disabled = false;
+        sessionList.forEach((session) => {
+          const option = document.createElement("option");
+          option.value = session.session_id;
+          const state = session.closed ? "closed" : "open";
+          option.textContent = session.session_id.slice(0, 8) + " (" + state + ")";
+          if (session.session_id === selectedSessionId) {
+            option.selected = true;
+          }
+          sessionPickerNode.appendChild(option);
+        });
+      }
+
+      async function createSession() {
+        const payload = await sendJson("/api/sessions", "POST");
+        await listSessions();
+        await connectToSession(payload.session_id);
+      }
+
+      async function resizeTerminal() {
+        if (!sessionId) {
+          return;
+        }
+        terminal.fit();
+        const cols = Math.max(terminal.cols, 20);
+        const rows = Math.max(terminal.rows, 8);
+        await sendJson("/api/sessions/" + sessionId + "/resize", "POST", {
+          cols,
+          rows
+        });
+      }
+
+      var reconnectAttempt = 0;
+      var reconnectTimer = null;
+      var lastCursor = 0;
+
+      function cancelReconnect() {
+        if (reconnectTimer) {
+          clearTimeout(reconnectTimer);
+          reconnectTimer = null;
+        }
+        reconnectAttempt = 0;
+      }
+
+      function scheduleReconnect(wsSessionId) {
+        if (sessionId !== wsSessionId) return;
+        reconnectAttempt += 1;
+        var delay = Math.min(500 * Math.pow(2, reconnectAttempt - 1), 10000);
+        setStatus("Reconnecting in " + Math.ceil(delay / 1000) + "s (attempt " + reconnectAttempt + ")");
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        reconnectTimer = setTimeout(function() {
+          reconnectTimer = null;
+          attemptReconnect(wsSessionId);
+        }, delay);
+      }
+
+      async function attemptReconnect(wsSessionId) {
+        if (sessionId !== wsSessionId) return;
+        setStatus("Reconnecting…");
+        try {
+          var payload = await sendJson("/api/sessions", "GET");
+          if (sessionId !== wsSessionId) return;
+          sessionList = payload.sessions;
+          renderSessionPicker();
+          var exists = sessionList.some(function(s) { return s.session_id === wsSessionId; });
+          if (!exists) {
+            setStatus("Session no longer exists");
+            terminal.writeln("");
+            terminal.writeln("[session gone — pick another from the menu]");
+            cancelReconnect();
+            return;
+          }
+        } catch (err) {
+          scheduleReconnect(wsSessionId);
+          return;
+        }
+        if (sessionId !== wsSessionId) return;
+        ws = openWebSocket(wsSessionId);
+      }
+
+      function openWebSocket(wsSessionId) {
+        var protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+        var url = protocol + "//" + window.location.host + "/api/sessions/" + wsSessionId + "/ws?cursor=" + lastCursor;
+        var socket = new WebSocket(url);
+        socket.binaryType = "arraybuffer";
+        socket.onopen = function() {
+          cancelReconnect();
+          setStatus("Connected via " + terminal.clientName);
+        };
+        socket.onmessage = function(event) {
+          if (event.data instanceof ArrayBuffer) {
+            var bytes = new Uint8Array(event.data);
+            if (bytes.length === 0) return;
+            var type = bytes[0];
+            var body = bytes.subarray(1);
+            if (type === 0x00) {
+              try {
+                var meta = JSON.parse(new TextDecoder("utf-8").decode(body));
+                if (typeof meta.cursor === "number") {
+                  lastCursor = meta.cursor;
+                }
+              } catch (err) {
+                console.error("bad metadata frame:", err);
+              }
+            } else if (type === 0x01) {
+              terminal.write(new TextDecoder("utf-8").decode(body));
+            }
+            return;
+          }
+          terminal.write(event.data);
+          lastCursor += Array.from(event.data).length;
+        };
+        socket.onclose = function() {
+          if (sessionId === wsSessionId) {
+            scheduleReconnect(wsSessionId);
+          }
+        };
+        socket.onerror = function(error) {
+          console.error("WebSocket error:", error);
+        };
+        return socket;
+      }
+
+      async function connectToSession(nextSessionId) {
+        if (!nextSessionId) {
+          return;
+        }
+        cancelReconnect();
+        if (ws) {
+          ws.onclose = null;
+          ws.close();
+          ws = null;
+        }
+        lastCursor = 0;
+        sessionId = nextSessionId;
+        ctrlArmed = false;
+        setCtrlButtonState();
+        if (typeof terminal.clear === "function") {
+          terminal.clear();
+        }
+        terminal.fit();
+        await resizeTerminal();
+        window.localStorage.setItem("saibai-terminal-session", sessionId);
+        renderSessionPicker();
+        ws = openWebSocket(sessionId);
+        setStatus("Connected via " + terminal.clientName);
+      }
+
+      async function closeSelectedSession() {
+        const targetSessionId = sessionPickerNode.value || sessionId;
+        if (!targetSessionId) {
+          return;
+        }
+        await sendJson("/api/sessions/" + targetSessionId, "DELETE");
+        if (sessionId === targetSessionId) {
+          cancelReconnect();
+          if (ws) {
+            ws.onclose = null;
+            ws.close();
+            ws = null;
+          }
+          sessionId = null;
+          window.localStorage.removeItem("saibai-terminal-session");
+          if (typeof terminal.clear === "function") {
+            terminal.clear();
+          }
+          setStatus("Session closed");
+        }
+        await listSessions();
+      }
+
+      terminal.onData((data) => {
+        if (!sessionId) {
+          return;
+        }
+        sendInput(useCtrlModifier(data));
+      });
+
+      keyButtons.forEach((button) => {
+        button.addEventListener("click", () => {
+          const key = button.dataset.key;
+          if (key === "ctrl") {
+            ctrlArmed = !ctrlArmed;
+            setCtrlButtonState();
+            return;
+          }
+          if (!sessionId) {
+            return;
+          }
+          if (buttonInputs[key]) {
+            sendInput(buttonInputs[key]);
+          }
+        });
+      });
+
+      connectSessionNode.addEventListener("click", () => {
+        connectToSession(sessionPickerNode.value).catch((error) => {
+          setStatus("Connection failed");
+          console.error(error);
+        });
+      });
+
+      menuToggleNode.addEventListener("click", () => {
+        setMenuExpanded(!menuExpanded);
+        updateViewportMetrics();
+        resizeTerminal().catch((error) => console.error(error));
+      });
+
+      newSessionNode.addEventListener("click", () => {
+        createSession().catch((error) => {
+          setStatus("Connection failed");
+          console.error(error);
+        });
+      });
+
+      closeSessionNode.addEventListener("click", () => {
+        closeSelectedSession().catch((error) => {
+          setStatus("Close failed");
+          console.error(error);
+        });
+      });
+
+      async function loadFullHistory() {
+        if (!sessionId) return;
+        setStatus("Loading history…");
+        const response = await fetch("/api/sessions/" + sessionId + "/history");
+        if (!response.ok) {
+          throw new Error("Request failed: " + response.status);
+        }
+        const history = await response.text();
+        if (typeof terminal.clear === "function") {
+          terminal.clear();
+        }
+        terminal.write(history);
+        setStatus("Full history (" + history.length + " bytes)");
+      }
+
+      fullHistoryNode.addEventListener("click", () => {
+        loadFullHistory().catch((error) => {
+          setStatus("History load failed");
+          console.error(error);
+        });
+      });
+
+      window.addEventListener("resize", () => {
+        updateViewportMetrics();
+        resizeTerminal().catch((error) => console.error(error));
+      });
+
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener("resize", () => {
+          updateViewportMetrics();
+          resizeTerminal().catch((error) => console.error(error));
+        });
+        window.visualViewport.addEventListener("scroll", () => {
+          updateViewportMetrics();
+        });
+      }
+
+      window.addEventListener("beforeunload", () => {
+        cancelReconnect();
+        if (ws) {
+          ws.onclose = null;
+          ws.close();
+          ws = null;
+        }
+      });
+
+      document.addEventListener("visibilitychange", () => {
+        if (document.hidden || !sessionId) return;
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+          if (reconnectTimer) {
+            clearTimeout(reconnectTimer);
+            reconnectTimer = null;
+          }
+          attemptReconnect(sessionId);
+        }
+      });
+
+      async function initializePage() {
+        await listSessions();
+        const preferredSessionId = window.localStorage.getItem("saibai-terminal-session");
+        const availableSessionId = preferredSessionId && sessionList.some((session) => session.session_id === preferredSessionId)
+          ? preferredSessionId
+          : (sessionList[0] && sessionList[0].session_id);
+        if (availableSessionId) {
+          await connectToSession(availableSessionId);
+          return;
+        }
+        await createSession();
+      }
+
+      initializePage().catch((error) => {
+        setStatus("Connection failed");
+        terminal.writeln("[unable to start terminal]");
+        console.error(error);
+      });
+    </script>
+  </body>
+</html>

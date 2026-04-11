@@ -1,0 +1,954 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Saibai Dashboard</title>
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css"
+    />
+    <style>
+      :root {
+        color-scheme: dark;
+        --page: #0b1020;
+        --panel: #11182d;
+        --border: #24304e;
+        --text: #dbe5ff;
+        --muted: #8ea1c9;
+        --accent: rgba(76, 112, 255, 0.28);
+        --accent-border: rgba(154, 176, 255, 0.6);
+      }
+
+      * { box-sizing: border-box; margin: 0; }
+
+      body {
+        height: 100dvh;
+        background:
+          radial-gradient(circle at top, rgba(76, 112, 255, 0.18), transparent 30%),
+          linear-gradient(180deg, #11162a 0%, var(--page) 65%);
+        color: var(--text);
+        font-family: "SFMono-Regular", "Menlo", "Monaco", monospace;
+        overflow: hidden;
+      }
+
+      .dashboard {
+        display: grid;
+        grid-template-columns: 320px minmax(0, 1fr);
+        height: 100dvh;
+        gap: 8px;
+        padding: 10px;
+        overflow: hidden;
+      }
+
+      .sidebar {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        min-height: 0;
+        overflow: hidden;
+      }
+
+      .sidebar__header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 10px 12px;
+        background: rgba(17, 24, 45, 0.92);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        backdrop-filter: blur(12px);
+        flex-shrink: 0;
+      }
+
+      .sidebar__title {
+        font-size: 11px;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+
+      .btn {
+        border: 1px solid var(--border);
+        background: rgba(17, 24, 45, 0.92);
+        color: var(--text);
+        border-radius: 999px;
+        padding: 6px 12px;
+        font: inherit;
+        font-size: 11px;
+        line-height: 1;
+        cursor: pointer;
+      }
+
+      .btn:hover { background: var(--accent); border-color: var(--accent-border); }
+
+      .session-list {
+        flex: 1;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        min-width: 0;
+      }
+
+      .session-card {
+        padding: 10px 12px;
+        background: rgba(17, 24, 45, 0.92);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        cursor: pointer;
+        transition: border-color 0.15s, background 0.15s;
+        min-width: 0;
+      }
+
+      .session-card:hover { border-color: var(--accent-border); }
+
+      .session-card.is-active {
+        background: var(--accent);
+        border-color: var(--accent-border);
+      }
+
+      .session-card__label {
+        font-size: 12px;
+        font-weight: 600;
+        margin-bottom: 4px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        min-width: 0;
+      }
+
+      .session-card__label > span:first-child {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        min-width: 0;
+      }
+
+      .session-card__meta {
+        font-size: 10px;
+        color: var(--muted);
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        overflow-wrap: break-word;
+        word-break: break-all;
+        min-width: 0;
+      }
+
+      .session-card__port a {
+        color: #7b9dff;
+        text-decoration: none;
+      }
+
+      .session-card__port a:hover { text-decoration: underline; }
+
+      .session-card__status {
+        display: inline-block;
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: #3ecf8e;
+      }
+
+      .session-card__status.is-closed { background: #f87171; }
+      .session-card__status.is-processing { background: #facc15; }
+
+      .session-card__rename {
+        background: rgba(10, 15, 30, 0.94);
+        border: 1px solid var(--accent-border);
+        color: var(--text);
+        font: inherit;
+        font-size: 11px;
+        border-radius: 4px;
+        padding: 1px 4px;
+        width: 100%;
+        outline: none;
+      }
+
+      .session-card__close {
+        background: none;
+        border: none;
+        color: var(--muted);
+        font-size: 14px;
+        cursor: pointer;
+        padding: 0 2px;
+        line-height: 1;
+      }
+
+      .session-card__close:hover { color: #f87171; }
+
+      .main-panel {
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        min-width: 0;
+        gap: 8px;
+        overflow: hidden;
+      }
+
+      .terminal-container {
+        flex: 1;
+        min-height: 0;
+        padding: 8px;
+        background: rgba(10, 15, 30, 0.94);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .terminal-container.is-empty {
+        align-items: center;
+        justify-content: center;
+      }
+
+      .terminal-container.is-empty::after {
+        content: "Select or create a session";
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      #session-terminal {
+        width: 100%;
+        max-width: 100%;
+        flex: 1 1 0;
+        min-height: 0;
+        overflow: hidden;
+        position: relative;
+      }
+
+      #session-terminal .xterm { height: 100%; width: 100%; }
+
+      .terminal-bar {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        padding: 6px 8px;
+        flex-wrap: wrap;
+      }
+
+      .terminal-bar__keys {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+
+      .key-btn {
+        border: 1px solid var(--border);
+        background: rgba(17, 24, 45, 0.92);
+        color: var(--text);
+        border-radius: 999px;
+        padding: 4px 8px;
+        font: inherit;
+        font-size: 10px;
+        line-height: 1;
+        cursor: pointer;
+      }
+
+      .key-btn.is-active {
+        background: var(--accent);
+        border-color: var(--accent-border);
+      }
+
+      /* New session form */
+      .new-session-form {
+        display: none;
+        flex-direction: column;
+        gap: 6px;
+        padding: 10px 12px;
+        background: rgba(17, 24, 45, 0.92);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        flex-shrink: 0;
+      }
+
+      .new-session-form.is-visible { display: flex; }
+
+      .new-session-form label {
+        font-size: 10px;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+
+      .new-session-form input {
+        border: 1px solid var(--border);
+        background: rgba(10, 15, 30, 0.94);
+        color: var(--text);
+        border-radius: 6px;
+        padding: 5px 8px;
+        font: inherit;
+        font-size: 11px;
+      }
+
+      .new-session-form__actions {
+        display: flex;
+        gap: 6px;
+        margin-top: 4px;
+      }
+
+      .suggestions {
+        position: absolute;
+        top: 100%;
+        left: 0;
+        right: 0;
+        max-height: 180px;
+        overflow-y: auto;
+        background: rgba(10, 15, 30, 0.98);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        z-index: 10;
+        margin-top: 2px;
+      }
+
+      .suggestions__item {
+        padding: 5px 8px;
+        font-size: 11px;
+        cursor: pointer;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .suggestions__item:hover,
+      .suggestions__item.is-selected {
+        background: var(--accent);
+      }
+
+      .back-btn {
+        display: none;
+      }
+
+      @media (max-width: 640px) {
+        .dashboard {
+          grid-template-columns: 1fr;
+          grid-template-rows: minmax(0, 1fr);
+        }
+
+        .sidebar {
+          min-height: 0;
+        }
+
+        .main-panel { display: none; }
+
+        .dashboard.is-terminal-view .sidebar { display: none; }
+        .dashboard.is-terminal-view .main-panel { display: flex; }
+
+        .back-btn {
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
+          border: 1px solid var(--border);
+          background: rgba(17, 24, 45, 0.92);
+          color: var(--text);
+          border-radius: 999px;
+          padding: 6px 12px;
+          font: inherit;
+          font-size: 11px;
+          line-height: 1;
+          cursor: pointer;
+          margin-bottom: 4px;
+        }
+
+        .back-btn:hover { background: var(--accent); }
+
+        .terminal-container {
+          border-radius: 10px;
+        }
+
+        .key-btn {
+          padding: 8px 12px;
+          font-size: 12px;
+        }
+
+        .session-card {
+          padding: 12px 14px;
+        }
+
+        .session-card__label { font-size: 13px; }
+        .session-card__meta { font-size: 11px; }
+        .session-card__close { font-size: 18px; padding: 4px 6px; }
+
+        .btn {
+          padding: 8px 14px;
+          font-size: 12px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="dashboard">
+      <aside class="sidebar">
+        <div class="sidebar__header">
+          <span class="sidebar__title">Sessions</span>
+          <button class="btn" id="toggle-new-form" type="button">+ New</button>
+        </div>
+        <div class="new-session-form" id="new-session-form">
+          <label>Label (optional)</label>
+          <input id="form-label" type="text" placeholder="my-feature" />
+          <label>Repository path (optional)</label>
+          <div style="position:relative">
+            <input id="form-repo" type="text" placeholder="/path/to/repo" autocomplete="off" />
+            <div id="repo-suggestions" class="suggestions" hidden></div>
+          </div>
+          <label>Branch (optional)</label>
+          <input id="form-branch" type="text" placeholder="feature/my-branch" />
+          <label>Port (auto-assigned)</label>
+          <input id="form-port" type="number" placeholder="4000" />
+          <div class="new-session-form__actions">
+            <button class="btn" id="form-create" type="button">Create</button>
+            <button class="btn" id="form-cancel" type="button">Cancel</button>
+          </div>
+        </div>
+        <div class="session-list" id="session-list"></div>
+      </aside>
+      <div class="main-panel">
+        <button class="back-btn" id="back-to-sessions" type="button">&#8592; Sessions</button>
+        <div class="terminal-container is-empty" id="terminal-container">
+          <div id="session-terminal"></div>
+        </div>
+        <div class="terminal-bar">
+          <div class="terminal-bar__keys">
+            <button class="key-btn" data-key="ctrl" type="button">Ctrl</button>
+            <button class="key-btn" data-key="esc" type="button">Esc</button>
+            <button class="key-btn" data-key="tab" type="button">Tab</button>
+            <button class="key-btn" data-key="up" type="button">Up</button>
+            <button class="key-btn" data-key="down" type="button">Down</button>
+            <button class="key-btn" data-key="left" type="button">Left</button>
+            <button class="key-btn" data-key="right" type="button">Right</button>
+            <button class="key-btn" id="full-history" type="button">History</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-canvas@0.7.0/lib/addon-canvas.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-image@0.8.0/lib/addon-image.min.js"></script>
+    <script>
+      const sessionListNode = document.getElementById("session-list");
+      const terminalContainerNode = document.getElementById("terminal-container");
+      const terminalNode = document.getElementById("session-terminal");
+      const toggleFormNode = document.getElementById("toggle-new-form");
+      const formNode = document.getElementById("new-session-form");
+      const formLabelNode = document.getElementById("form-label");
+      const formRepoNode = document.getElementById("form-repo");
+      const formBranchNode = document.getElementById("form-branch");
+      const formPortNode = document.getElementById("form-port");
+      const formCreateNode = document.getElementById("form-create");
+      const formCancelNode = document.getElementById("form-cancel");
+      const repoSuggestionsNode = document.getElementById("repo-suggestions");
+      const dashboardNode = document.querySelector(".dashboard");
+      const backBtnNode = document.getElementById("back-to-sessions");
+      const fullHistoryNode = document.getElementById("full-history");
+      const keyButtons = Array.from(document.querySelectorAll("[data-key]"));
+
+      let sessions = [];
+      let activeSessionId = null;
+      let ws = null;
+      let terminal = null;
+      let fitAddon = null;
+      let ctrlArmed = false;
+      let refreshTimer = null;
+      const buttonInputs = {
+        esc: "\x1b",
+        tab: "\t",
+        up: "\x1b[A",
+        down: "\x1b[B",
+        left: "\x1b[D",
+        right: "\x1b[C"
+      };
+
+      async function sendJson(url, method, payload) {
+        const response = await fetch(url, {
+          method,
+          headers: { "Content-Type": "application/json" },
+          body: payload ? JSON.stringify(payload) : undefined
+        });
+        if (!response.ok) throw new Error("Request failed: " + response.status);
+        return response.json();
+      }
+
+      function sendInput(data) {
+        if (ws && ws.readyState === WebSocket.OPEN) ws.send(data);
+      }
+
+      function useCtrlModifier(data) {
+        if (!ctrlArmed || !data || data.length !== 1) return data;
+        ctrlArmed = false;
+        updateCtrlState();
+        const code = data.toUpperCase().charCodeAt(0);
+        if (code >= 64 && code <= 95) return String.fromCharCode(code - 64);
+        return data;
+      }
+
+      function updateCtrlState() {
+        keyButtons.forEach(function(btn) {
+          if (btn.dataset.key === "ctrl") btn.classList.toggle("is-active", ctrlArmed);
+        });
+      }
+
+      function formatTime(timestamp) {
+        const date = new Date(timestamp * 1000);
+        return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      }
+
+      // --- Repo path autocomplete ---
+
+      let repoDebounce = null;
+
+      function showRepoSuggestions(paths) {
+        repoSuggestionsNode.replaceChildren();
+        if (paths.length === 0) {
+          repoSuggestionsNode.hidden = true;
+          return;
+        }
+        paths.forEach(function(p) {
+          const item = document.createElement("div");
+          item.className = "suggestions__item";
+          item.textContent = p;
+          item.addEventListener("mousedown", function(event) {
+            event.preventDefault();
+            formRepoNode.value = p + "/";
+            repoSuggestionsNode.hidden = true;
+            formRepoNode.focus();
+            formRepoNode.dispatchEvent(new Event("input"));
+          });
+          repoSuggestionsNode.appendChild(item);
+        });
+        repoSuggestionsNode.hidden = false;
+      }
+
+      formRepoNode.addEventListener("input", function() {
+        clearTimeout(repoDebounce);
+        const value = formRepoNode.value;
+        if (!value || value.length < 2) {
+          repoSuggestionsNode.hidden = true;
+          return;
+        }
+        repoDebounce = setTimeout(async function() {
+          try {
+            const payload = await sendJson("/api/paths?prefix=" + encodeURIComponent(value), "GET");
+            showRepoSuggestions(payload.paths);
+          } catch (e) {
+            repoSuggestionsNode.hidden = true;
+          }
+        }, 150);
+      });
+
+      formRepoNode.addEventListener("blur", function() {
+        setTimeout(function() { repoSuggestionsNode.hidden = true; }, 200);
+      });
+
+      // --- Session list rendering ---
+
+      function renderSessionList() {
+        sessionListNode.replaceChildren();
+        sessions.forEach(function(session) {
+          const card = document.createElement("div");
+          card.className = "session-card";
+          if (session.session_id === activeSessionId) card.className += " is-active";
+
+          const labelRow = document.createElement("div");
+          labelRow.className = "session-card__label";
+
+          const labelLeft = document.createElement("span");
+          const statusDot = document.createElement("span");
+          var dotClass = "session-card__status";
+          if (session.closed) dotClass += " is-closed";
+          else if (session.status === "processing") dotClass += " is-processing";
+          statusDot.className = dotClass;
+          labelLeft.appendChild(statusDot);
+          var labelText = " " + session.label;
+          if (session.status === "processing") labelText += " (processing…)";
+          if (session.cwd) labelText += " — " + session.cwd.split("/").pop();
+          const labelTextNode = document.createTextNode(labelText);
+          labelLeft.appendChild(labelTextNode);
+          labelLeft.addEventListener("dblclick", function(event) {
+            event.stopPropagation();
+            var input = document.createElement("input");
+            input.type = "text";
+            input.value = session.label;
+            input.className = "session-card__rename";
+            labelLeft.replaceChild(input, labelTextNode);
+            input.focus();
+            input.select();
+            function commit() {
+              var newLabel = input.value.trim();
+              if (newLabel && newLabel !== session.label) {
+                sendJson("/api/sessions/" + session.session_id + "/rename", "POST", { label: newLabel })
+                  .then(function() { refreshSessions(); })
+                  .catch(console.error);
+              } else {
+                renderSessionList();
+              }
+            }
+            input.addEventListener("keydown", function(e) {
+              if (e.key === "Enter") { e.preventDefault(); commit(); }
+              if (e.key === "Escape") { e.preventDefault(); renderSessionList(); }
+            });
+            input.addEventListener("blur", commit);
+          });
+          labelRow.appendChild(labelLeft);
+
+          const closeBtn = document.createElement("button");
+          closeBtn.className = "session-card__close";
+          closeBtn.textContent = "\u00d7";
+          closeBtn.title = "Close session";
+          closeBtn.addEventListener("click", function(event) {
+            event.stopPropagation();
+            closeSession(session.session_id);
+          });
+          labelRow.appendChild(closeBtn);
+
+          const meta = document.createElement("div");
+          meta.className = "session-card__meta";
+          meta.innerHTML = formatTime(session.created_at);
+          if (session.port) {
+            const portSpan = document.createElement("span");
+            portSpan.className = "session-card__port";
+            const portLink = document.createElement("a");
+            portLink.href = window.location.protocol + "//" + window.location.hostname + ":" + session.port;
+            portLink.target = "_blank";
+            portLink.textContent = ":" + session.port;
+            portLink.addEventListener("click", function(event) { event.stopPropagation(); });
+            portSpan.appendChild(portLink);
+            meta.appendChild(portSpan);
+          }
+          if (session.worktree_path) {
+            const branchSpan = document.createElement("span");
+            branchSpan.textContent = session.worktree_path.split("/").pop();
+            meta.appendChild(branchSpan);
+          }
+
+          card.appendChild(labelRow);
+          card.appendChild(meta);
+
+          card.addEventListener("click", function() {
+            connectToSession(session.session_id);
+          });
+
+          sessionListNode.appendChild(card);
+        });
+      }
+
+      async function refreshSessions() {
+        const payload = await sendJson("/api/sessions", "GET");
+        sessions = payload.sessions;
+        renderSessionList();
+      }
+
+      async function closeSession(sessionId) {
+        await sendJson("/api/sessions/" + sessionId, "DELETE");
+        if (activeSessionId === sessionId) {
+          disconnectTerminal();
+        }
+        await refreshSessions();
+      }
+
+      // --- Terminal management ---
+
+      function createTerminal() {
+        if (terminal) return;
+        terminalContainerNode.classList.remove("is-empty");
+        if (typeof window.Terminal === "function") {
+          terminal = new Terminal({
+            cursorBlink: true,
+            fontSize: 12,
+            theme: {
+              background: "#0a0f1e",
+              foreground: "#dbe5ff",
+              cursor: "#9ab0ff",
+              black: "#101828",
+              brightBlack: "#51607b"
+            }
+          });
+          if (window.FitAddon && typeof window.FitAddon.FitAddon === "function") {
+            fitAddon = new FitAddon.FitAddon();
+            terminal.loadAddon(fitAddon);
+          }
+          terminal.open(terminalNode);
+          if (window.CanvasAddon && typeof window.CanvasAddon.CanvasAddon === "function") {
+            try {
+              terminal.loadAddon(new CanvasAddon.CanvasAddon());
+            } catch (err) {
+              console.warn("canvas addon failed:", err);
+            }
+          }
+          if (window.ImageAddon && typeof window.ImageAddon.ImageAddon === "function") {
+            try {
+              terminal.loadAddon(new ImageAddon.ImageAddon());
+            } catch (err) {
+              console.warn("image addon failed:", err);
+            }
+          }
+          terminal.onData(function(data) {
+            if (activeSessionId) sendInput(useCtrlModifier(data));
+          });
+        }
+      }
+
+      function fitTerminal() {
+        if (fitAddon) fitAddon.fit();
+      }
+
+      function disconnectTerminal() {
+        cancelReconnect();
+        if (ws) {
+          ws.onclose = null;
+          ws.close();
+          ws = null;
+        }
+        activeSessionId = null;
+        if (terminal) {
+          terminal.clear();
+        }
+        terminalContainerNode.classList.add("is-empty");
+        dashboardNode.classList.remove("is-terminal-view");
+        renderSessionList();
+      }
+
+      let reconnectAttempt = 0;
+      let reconnectTimer = null;
+      let lastCursor = 0;
+
+      function cancelReconnect() {
+        if (reconnectTimer) {
+          clearTimeout(reconnectTimer);
+          reconnectTimer = null;
+        }
+        reconnectAttempt = 0;
+      }
+
+      function scheduleReconnect(wsSessionId) {
+        if (activeSessionId !== wsSessionId) return;
+        reconnectAttempt += 1;
+        const delay = Math.min(500 * Math.pow(2, reconnectAttempt - 1), 10000);
+        if (terminal) {
+          terminal.writeln("[reconnecting in " + Math.ceil(delay / 1000) + "s…]");
+        }
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        reconnectTimer = setTimeout(function() {
+          reconnectTimer = null;
+          attemptReconnect(wsSessionId);
+        }, delay);
+      }
+
+      async function attemptReconnect(wsSessionId) {
+        if (activeSessionId !== wsSessionId) return;
+        try {
+          const payload = await sendJson("/api/sessions", "GET");
+          if (activeSessionId !== wsSessionId) return;
+          const exists = payload.sessions.some(function(s) { return s.session_id === wsSessionId; });
+          if (!exists) {
+            if (terminal) terminal.writeln("[session gone]");
+            cancelReconnect();
+            await refreshSessions();
+            return;
+          }
+        } catch (err) {
+          scheduleReconnect(wsSessionId);
+          return;
+        }
+        if (activeSessionId !== wsSessionId) return;
+        ws = openWebSocket(wsSessionId);
+      }
+
+      function openWebSocket(wsSessionId) {
+        const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+        const url = protocol + "//" + window.location.host + "/api/sessions/" + wsSessionId + "/ws?cursor=" + lastCursor;
+        const socket = new WebSocket(url);
+        socket.binaryType = "arraybuffer";
+        socket.onopen = function() {
+          cancelReconnect();
+        };
+        socket.onmessage = function(event) {
+          if (event.data instanceof ArrayBuffer) {
+            const bytes = new Uint8Array(event.data);
+            if (bytes.length === 0) return;
+            const type = bytes[0];
+            const body = bytes.subarray(1);
+            if (type === 0x00) {
+              try {
+                const meta = JSON.parse(new TextDecoder("utf-8").decode(body));
+                if (typeof meta.cursor === "number") {
+                  lastCursor = meta.cursor;
+                }
+              } catch (err) {
+                console.error("bad metadata frame:", err);
+              }
+            } else if (type === 0x01) {
+              if (terminal) terminal.write(new TextDecoder("utf-8").decode(body));
+            }
+            return;
+          }
+          if (terminal) terminal.write(event.data);
+          lastCursor += Array.from(event.data).length;
+        };
+        socket.onclose = function() {
+          if (activeSessionId === wsSessionId) {
+            scheduleReconnect(wsSessionId);
+          }
+        };
+        socket.onerror = function(err) {
+          console.error("WebSocket error:", err);
+        };
+        return socket;
+      }
+
+      async function connectToSession(sessionId) {
+        if (activeSessionId === sessionId) return;
+        cancelReconnect();
+        if (ws) {
+          ws.onclose = null;
+          ws.close();
+          ws = null;
+        }
+        lastCursor = 0;
+        createTerminal();
+        if (terminal) terminal.clear();
+        activeSessionId = sessionId;
+        dashboardNode.classList.add("is-terminal-view");
+        renderSessionList();
+
+        fitTerminal();
+        const cols = terminal ? Math.max(terminal.cols, 20) : 120;
+        const rows = terminal ? Math.max(terminal.rows, 8) : 32;
+        await sendJson("/api/sessions/" + sessionId + "/resize", "POST", { cols, rows });
+
+        ws = openWebSocket(sessionId);
+      }
+
+      // --- New session form ---
+
+      toggleFormNode.addEventListener("click", function() {
+        formNode.classList.toggle("is-visible");
+      });
+
+      formCancelNode.addEventListener("click", function() {
+        formNode.classList.remove("is-visible");
+      });
+
+      formCreateNode.addEventListener("click", async function() {
+        const body = {};
+        const label = formLabelNode.value.trim();
+        const repo = formRepoNode.value.trim();
+        const branch = formBranchNode.value.trim();
+        const port = formPortNode.value.trim();
+        if (label) body.label = label;
+        if (repo) body.repo_path = repo;
+        if (branch) body.branch = branch;
+        if (port) body.port = parseInt(port, 10);
+        const payload = await sendJson("/api/sessions", "POST", Object.keys(body).length ? body : undefined);
+        formLabelNode.value = "";
+        formBranchNode.value = "";
+        formPortNode.value = "";
+        formNode.classList.remove("is-visible");
+        await refreshSessions();
+        connectToSession(payload.session_id);
+      });
+
+      // --- Back button (mobile) ---
+
+      backBtnNode.addEventListener("click", function() {
+        disconnectTerminal();
+      });
+
+      async function loadFullHistory() {
+        if (!activeSessionId || !terminal) return;
+        const response = await fetch("/api/sessions/" + activeSessionId + "/history");
+        if (!response.ok) throw new Error("Request failed: " + response.status);
+        const history = await response.text();
+        terminal.clear();
+        terminal.write(history);
+      }
+
+      fullHistoryNode.addEventListener("click", function() {
+        loadFullHistory().catch(function(err) {
+          console.error("history load failed:", err);
+        });
+      });
+
+      // --- Key buttons ---
+
+      keyButtons.forEach(function(btn) {
+        btn.addEventListener("click", function() {
+          const key = btn.dataset.key;
+          if (key === "ctrl") {
+            ctrlArmed = !ctrlArmed;
+            updateCtrlState();
+            return;
+          }
+          if (activeSessionId && buttonInputs[key]) sendInput(buttonInputs[key]);
+        });
+      });
+
+      // --- Resize handling ---
+
+      async function handleResize() {
+        if (!activeSessionId || !terminal) return;
+        fitTerminal();
+        const cols = Math.max(terminal.cols, 20);
+        const rows = Math.max(terminal.rows, 8);
+        await sendJson("/api/sessions/" + activeSessionId + "/resize", "POST", { cols, rows });
+      }
+
+      window.addEventListener("resize", function() {
+        handleResize().catch(console.error);
+      });
+
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener("resize", function() {
+          handleResize().catch(console.error);
+        });
+      }
+
+      // --- Auto-refresh session list ---
+
+      refreshTimer = setInterval(function() {
+        refreshSessions().catch(console.error);
+      }, 5000);
+
+      // --- SSE notifications with audio ---
+
+      var notifySound = new Audio("/api/sounds/glass");
+      notifySound.load();
+      document.addEventListener("click", function unlockAudio() {
+        notifySound.volume = 0;
+        notifySound.play().then(function() {
+          notifySound.pause();
+          notifySound.currentTime = 0;
+          notifySound.volume = 1;
+          document.removeEventListener("click", unlockAudio);
+        }).catch(function() {});
+      });
+
+      document.addEventListener("visibilitychange", function() {
+        if (document.hidden || !activeSessionId) return;
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+          if (reconnectTimer) {
+            clearTimeout(reconnectTimer);
+            reconnectTimer = null;
+          }
+          attemptReconnect(activeSessionId);
+        }
+      });
+
+      var eventSource = new EventSource("/api/events");
+      eventSource.onmessage = function(event) {
+        var data = JSON.parse(event.data);
+        if (data.event === "done") {
+          notifySound.currentTime = 0;
+          notifySound.play().catch(function(e) { console.warn("audio play failed:", e); });
+        }
+        refreshSessions().catch(console.error);
+      };
+
+      // --- Initialize ---
+
+      refreshSessions().catch(console.error);
+    </script>
+  </body>
+</html>

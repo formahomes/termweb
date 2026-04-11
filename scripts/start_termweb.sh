@@ -8,6 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 RUNTIME_DIR="$HOME/.termweb-runtime"
 RUNTIME_FILE="$RUNTIME_DIR/web_terminal_server.py"
+STATIC_DIR="$PROJECT_ROOT/python/src/web_terminal/static"
 STDOUT_LOG="/tmp/termweb-web-terminal.out"
 STDERR_LOG="/tmp/termweb-web-terminal.err"
 SERVICE_LABEL="com.termweb.web-terminal"
@@ -36,7 +37,7 @@ launchctl submit \
   -l "$SERVICE_LABEL" \
   -o "$STDOUT_LOG" \
   -e "$STDERR_LOG" \
-  -- "$PYTHON_BIN" "$RUNTIME_FILE" --host 0.0.0.0 --port "$PORT"
+  -- "$PYTHON_BIN" "$RUNTIME_FILE" --host 0.0.0.0 --port "$PORT" --static-dir "$STATIC_DIR"
 
 sleep 1
 

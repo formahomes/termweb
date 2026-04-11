@@ -28,6 +28,7 @@ DEFAULT_OUTPUT_TIMEOUT = 0.25
 DEFAULT_READ_SIZE = 4096
 PROCESS_EXIT_TIMEOUT = 1.0
 INPUT_BATCH_DELAY = 0.01
+DEFAULT_TAIL_LINES = 2000
 SESSION_PORT_BASE = 4000
 TMUX_SESSION_PREFIX = "termweb-"
 TMUX_BIN = (
@@ -35,6 +36,9 @@ TMUX_BIN = (
     or shutil.which("tmux", path="/opt/homebrew/bin:/usr/local/bin:/usr/bin")
     or "tmux"
 )
+DEFAULT_STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+
 def list_directories(prefix: str) -> Dict[str, list]:
     """Return directories matching a path prefix for autocomplete."""
     if not prefix:
@@ -63,1483 +67,6 @@ def list_directories(prefix: str) -> Dict[str, list]:
             entries = []
     return {"paths": entries[:50]}
 
-
-TERMINAL_PAGE = """<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Saibai Terminal</title>
-    <link
-      rel="stylesheet"
-      href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css"
-    />
-    <style>
-      :root {
-        color-scheme: dark;
-        --page: #0b1020;
-        --panel: #11182d;
-        --border: #24304e;
-        --text: #dbe5ff;
-        --muted: #8ea1c9;
-        --app-height: 100dvh;
-        --app-width: 100vw;
-      }
-
-      * {
-        box-sizing: border-box;
-      }
-
-      body {
-        margin: 0;
-        min-height: var(--app-height);
-        max-width: 100%;
-        background:
-          radial-gradient(circle at top, rgba(76, 112, 255, 0.18), transparent 30%),
-          linear-gradient(180deg, #11162a 0%, var(--page) 65%);
-        color: var(--text);
-        font-family: "SFMono-Regular", "Menlo", "Monaco", monospace;
-        overflow: hidden;
-      }
-
-      .shell {
-        display: grid;
-        grid-template-rows: auto minmax(0, 1fr);
-        min-height: var(--app-height);
-        height: var(--app-height);
-        padding: 10px;
-        gap: 8px;
-        width: 100%;
-        max-width: var(--app-width);
-        overflow: hidden;
-      }
-
-      .shell__header {
-        display: grid;
-        gap: 8px;
-        padding: 8px 10px;
-        background: rgba(17, 24, 45, 0.92);
-        border: 1px solid var(--border);
-        border-radius: 12px;
-        backdrop-filter: blur(12px);
-      }
-
-      .shell__bar {
-        display: grid;
-        grid-template-columns: auto minmax(0, 1fr) auto;
-        gap: 8px;
-        align-items: center;
-      }
-
-      .shell__title {
-        font-size: 11px;
-        letter-spacing: 0.06em;
-        text-transform: uppercase;
-      }
-
-      .shell__status {
-        color: var(--muted);
-        font-size: 10px;
-        text-align: center;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-      }
-
-      .shell__menu {
-        display: grid;
-        gap: 8px;
-      }
-
-      .shell__menu[hidden] {
-        display: none;
-      }
-
-      .shell__controls {
-        display: flex;
-        gap: 10px;
-        align-items: center;
-        flex-wrap: wrap;
-      }
-
-      .shell__select {
-        min-width: 132px;
-        border: 1px solid var(--border);
-        background: rgba(10, 15, 30, 0.94);
-        color: var(--text);
-        border-radius: 8px;
-        padding: 6px 8px;
-        font: inherit;
-        font-size: 11px;
-      }
-
-      .shell__terminal {
-        display: flex;
-        flex-direction: column;
-        min-height: 0;
-        min-width: 0;
-        padding: 8px;
-        background: rgba(10, 15, 30, 0.94);
-        border: 1px solid var(--border);
-        border-radius: 14px;
-        box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
-        overflow: hidden;
-      }
-
-      .shell__keys {
-        display: flex;
-        gap: 6px;
-        flex-wrap: wrap;
-      }
-
-      .shell__key {
-        border: 1px solid var(--border);
-        background: rgba(17, 24, 45, 0.92);
-        color: var(--text);
-        border-radius: 999px;
-        padding: 6px 10px;
-        font: inherit;
-        font-size: 11px;
-        line-height: 1;
-      }
-
-      .shell__key.is-active {
-        background: rgba(76, 112, 255, 0.28);
-        border-color: rgba(154, 176, 255, 0.6);
-      }
-
-      .shell__key--menu {
-        min-width: 58px;
-      }
-
-      #terminal {
-        width: 100%;
-        max-width: 100%;
-        flex: 1 1 0;
-        min-height: 0;
-        overflow: hidden;
-        position: relative;
-      }
-
-      #terminal .xterm,
-      #terminal .xterm-viewport,
-      #terminal .xterm-screen {
-        height: 100%;
-        max-width: 100%;
-        overflow: hidden;
-      }
-    </style>
-  </head>
-  <body>
-    <main class="shell">
-      <header class="shell__header">
-        <div class="shell__bar">
-          <div class="shell__title">Saibai Remote Terminal</div>
-          <div class="shell__status" id="status">Connecting…</div>
-          <button class="shell__key shell__key--menu" id="menu-toggle" type="button">Menu</button>
-        </div>
-        <div class="shell__menu" hidden>
-          <div class="shell__controls">
-            <select class="shell__select" id="session-picker"></select>
-            <button class="shell__key" id="connect-session" type="button">Connect</button>
-            <button class="shell__key" id="new-session" type="button">New</button>
-            <button class="shell__key" id="close-session" type="button">Close</button>
-          </div>
-          <div class="shell__keys">
-            <button class="shell__key" data-key="ctrl" type="button">Ctrl</button>
-            <button class="shell__key" data-key="esc" type="button">Esc</button>
-            <button class="shell__key" data-key="tab" type="button">Tab</button>
-            <button class="shell__key" data-key="up" type="button">Up</button>
-            <button class="shell__key" data-key="down" type="button">Down</button>
-            <button class="shell__key" data-key="left" type="button">Left</button>
-            <button class="shell__key" data-key="right" type="button">Right</button>
-          </div>
-        </div>
-      </header>
-      <section class="shell__terminal">
-        <div id="terminal"></div>
-      </section>
-    </main>
-    <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
-    <script>
-      const statusNode = document.getElementById("status");
-      const terminalNode = document.getElementById("terminal");
-      const menuToggleNode = document.getElementById("menu-toggle");
-      const menuPanelNode = document.querySelector(".shell__menu");
-      const sessionPickerNode = document.getElementById("session-picker");
-      const connectSessionNode = document.getElementById("connect-session");
-      const newSessionNode = document.getElementById("new-session");
-      const closeSessionNode = document.getElementById("close-session");
-      const keyButtons = Array.from(document.querySelectorAll("[data-key]"));
-      const SESSION_STORAGE_KEY = "saibai-terminal-session";
-      let sessionId = null;
-      let sessionList = [];
-      let ws = null;
-      let ctrlArmed = false;
-      let menuExpanded = false;
-      const buttonInputs = {
-        esc: "\\x1b",
-        tab: "\\t",
-        up: "\\x1b[A",
-        down: "\\x1b[B",
-        left: "\\x1b[D",
-        right: "\\x1b[C"
-      };
-
-      function setStatus(message) {
-        statusNode.textContent = message;
-      }
-
-      function setMenuExpanded(expanded) {
-        menuExpanded = expanded;
-        menuPanelNode.hidden = !expanded;
-        menuToggleNode.classList.toggle("is-active", expanded);
-        menuToggleNode.textContent = expanded ? "Hide" : "Menu";
-      }
-
-      function updateViewportMetrics() {
-        const viewport = window.visualViewport;
-        const height = viewport ? viewport.height : window.innerHeight;
-        const width = viewport ? viewport.width : window.innerWidth;
-        document.documentElement.style.setProperty("--app-height", height + "px");
-        document.documentElement.style.setProperty("--app-width", width + "px");
-      }
-
-      function createBasicTerminal() {
-        const outputNode = document.createElement("pre");
-        const inputNode = document.createElement("textarea");
-        outputNode.style.margin = "0";
-        outputNode.style.whiteSpace = "pre-wrap";
-        outputNode.style.wordBreak = "break-word";
-        outputNode.style.minHeight = "100%";
-        outputNode.style.color = "#dbe5ff";
-        outputNode.style.fontSize = "12px";
-        inputNode.setAttribute("aria-label", "Basic terminal input");
-        inputNode.style.position = "absolute";
-        inputNode.style.opacity = "0";
-        inputNode.style.pointerEvents = "none";
-        inputNode.style.height = "1px";
-        inputNode.style.width = "1px";
-        terminalNode.style.position = "relative";
-        terminalNode.style.overflow = "auto";
-        terminalNode.replaceChildren(outputNode, inputNode);
-
-        const listeners = [];
-        const terminal = {
-          cols: 120,
-          rows: 32,
-          open() {
-            outputNode.focus?.();
-          },
-          loadAddon() {},
-          write(data) {
-            outputNode.textContent += data;
-            terminalNode.scrollTop = terminalNode.scrollHeight;
-          },
-          writeln(data) {
-            terminal.write(data + "\\n");
-          },
-          clear() {
-            outputNode.textContent = "";
-          },
-          onData(listener) {
-            listeners.push(listener);
-          },
-          fit() {
-            const width = Math.max(terminalNode.clientWidth - 16, 320);
-            const height = Math.max(terminalNode.clientHeight - 16, 160);
-            terminal.cols = Math.max(Math.floor(width / 9), 20);
-            terminal.rows = Math.max(Math.floor(height / 18), 8);
-          }
-        };
-
-        function emit(data) {
-          listeners.forEach((listener) => listener(data));
-        }
-
-        function focusInput() {
-          inputNode.focus();
-        }
-
-        terminalNode.addEventListener("mousedown", focusInput);
-        window.addEventListener("load", focusInput);
-
-        inputNode.addEventListener("input", () => {
-          if (inputNode.value) {
-            emit(inputNode.value);
-            inputNode.value = "";
-          }
-        });
-
-        inputNode.addEventListener("keydown", (event) => {
-          const keys = {
-            Enter: "\\r",
-            Backspace: "\\x7f",
-            Tab: "\\t",
-            Escape: "\\x1b",
-            ArrowUp: "\\x1b[A",
-            ArrowDown: "\\x1b[B",
-            ArrowRight: "\\x1b[C",
-            ArrowLeft: "\\x1b[D"
-          };
-          if (event.ctrlKey && event.key === "c") {
-            event.preventDefault();
-            emit("\\x03");
-            return;
-          }
-          if (event.ctrlKey && event.key === "d") {
-            event.preventDefault();
-            emit("\\x04");
-            return;
-          }
-          if (event.ctrlKey && event.key === "l") {
-            event.preventDefault();
-            emit("\\x0c");
-            return;
-          }
-          if (keys[event.key]) {
-            event.preventDefault();
-            emit(keys[event.key]);
-          }
-        });
-
-        return terminal;
-      }
-
-      function createTerminal() {
-        if (typeof window.Terminal === "function") {
-          const terminal = new Terminal({
-            cursorBlink: true,
-            fontSize: 12,
-            theme: {
-              background: "#0a0f1e",
-              foreground: "#dbe5ff",
-              cursor: "#9ab0ff",
-              black: "#101828",
-              brightBlack: "#51607b"
-            }
-          });
-          let fitAddon = null;
-          if (window.FitAddon && typeof window.FitAddon.FitAddon === "function") {
-            fitAddon = new FitAddon.FitAddon();
-            terminal.loadAddon(fitAddon);
-          }
-          terminal.open(terminalNode);
-          terminal.fit = () => {
-            if (fitAddon) {
-              fitAddon.fit();
-              return;
-            }
-            const width = Math.max(terminalNode.clientWidth - 16, 100);
-            const height = Math.max(terminalNode.clientHeight - 16, 100);
-            const cols = Math.max(Math.floor(width / 9), 20);
-            const rows = Math.max(Math.floor(height / 18), 8);
-            terminal.resize(cols, rows);
-          };
-          terminal.fit();
-          terminal.clientName = fitAddon ? "xterm" : "xterm (manual sizing)";
-          return terminal;
-        }
-        const terminal = createBasicTerminal();
-        terminal.open(terminalNode);
-        terminal.clientName = "basic terminal";
-        return terminal;
-      }
-
-      const terminal = createTerminal();
-      updateViewportMetrics();
-      setMenuExpanded(false);
-
-      async function sendJson(url, method, payload) {
-        const response = await fetch(url, {
-          method,
-          headers: { "Content-Type": "application/json" },
-          body: payload ? JSON.stringify(payload) : undefined
-        });
-        if (!response.ok) {
-          throw new Error("Request failed: " + response.status);
-        }
-        return await response.json();
-      }
-
-      function sendInput(data) {
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(data);
-        }
-      }
-
-      function setCtrlButtonState() {
-        keyButtons.forEach((button) => {
-          if (button.dataset.key === "ctrl") {
-            button.classList.toggle("is-active", ctrlArmed);
-          }
-        });
-      }
-
-      function useCtrlModifier(data) {
-        if (!ctrlArmed || !data || data.length !== 1) {
-          return data;
-        }
-        ctrlArmed = false;
-        setCtrlButtonState();
-        const code = data.toUpperCase().charCodeAt(0);
-        if (code >= 64 && code <= 95) {
-          return String.fromCharCode(code - 64);
-        }
-        return data;
-      }
-
-      async function listSessions() {
-        const payload = await sendJson("/api/sessions", "GET");
-        sessionList = payload.sessions;
-        renderSessionPicker();
-        return sessionList;
-      }
-
-      function renderSessionPicker() {
-        const selectedSessionId = sessionId || window.localStorage.getItem("saibai-terminal-session") || "";
-        sessionPickerNode.replaceChildren();
-        if (sessionList.length === 0) {
-          const option = document.createElement("option");
-          option.value = "";
-          option.textContent = "No sessions";
-          sessionPickerNode.appendChild(option);
-          sessionPickerNode.disabled = true;
-          return;
-        }
-        sessionPickerNode.disabled = false;
-        sessionList.forEach((session) => {
-          const option = document.createElement("option");
-          option.value = session.session_id;
-          const state = session.closed ? "closed" : "open";
-          option.textContent = session.session_id.slice(0, 8) + " (" + state + ")";
-          if (session.session_id === selectedSessionId) {
-            option.selected = true;
-          }
-          sessionPickerNode.appendChild(option);
-        });
-      }
-
-      async function createSession() {
-        const payload = await sendJson("/api/sessions", "POST");
-        await listSessions();
-        await connectToSession(payload.session_id);
-      }
-
-      async function resizeTerminal() {
-        if (!sessionId) {
-          return;
-        }
-        terminal.fit();
-        const cols = Math.max(terminal.cols, 20);
-        const rows = Math.max(terminal.rows, 8);
-        await sendJson("/api/sessions/" + sessionId + "/resize", "POST", {
-          cols,
-          rows
-        });
-      }
-
-      function openWebSocket(wsSessionId) {
-        var protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-        var url = protocol + "//" + window.location.host + "/api/sessions/" + wsSessionId + "/ws";
-        var socket = new WebSocket(url);
-        socket.onmessage = function(event) {
-          terminal.write(event.data);
-        };
-        socket.onclose = function() {
-          if (sessionId === wsSessionId) {
-            setStatus("Disconnected");
-            terminal.writeln("");
-            terminal.writeln("[terminal disconnected]");
-            listSessions().catch(function(error) { console.error(error); });
-          }
-        };
-        socket.onerror = function(error) {
-          console.error("WebSocket error:", error);
-        };
-        return socket;
-      }
-
-      async function connectToSession(nextSessionId) {
-        if (!nextSessionId) {
-          return;
-        }
-        if (ws) {
-          ws.onclose = null;
-          ws.close();
-          ws = null;
-        }
-        sessionId = nextSessionId;
-        ctrlArmed = false;
-        setCtrlButtonState();
-        if (typeof terminal.clear === "function") {
-          terminal.clear();
-        }
-        terminal.fit();
-        await resizeTerminal();
-        window.localStorage.setItem("saibai-terminal-session", sessionId);
-        renderSessionPicker();
-        ws = openWebSocket(sessionId);
-        setStatus("Connected via " + terminal.clientName);
-      }
-
-      async function closeSelectedSession() {
-        const targetSessionId = sessionPickerNode.value || sessionId;
-        if (!targetSessionId) {
-          return;
-        }
-        await sendJson("/api/sessions/" + targetSessionId, "DELETE");
-        if (sessionId === targetSessionId) {
-          if (ws) {
-            ws.onclose = null;
-            ws.close();
-            ws = null;
-          }
-          sessionId = null;
-          window.localStorage.removeItem("saibai-terminal-session");
-          if (typeof terminal.clear === "function") {
-            terminal.clear();
-          }
-          setStatus("Session closed");
-        }
-        await listSessions();
-      }
-
-      terminal.onData((data) => {
-        if (!sessionId) {
-          return;
-        }
-        sendInput(useCtrlModifier(data));
-      });
-
-      keyButtons.forEach((button) => {
-        button.addEventListener("click", () => {
-          const key = button.dataset.key;
-          if (key === "ctrl") {
-            ctrlArmed = !ctrlArmed;
-            setCtrlButtonState();
-            return;
-          }
-          if (!sessionId) {
-            return;
-          }
-          if (buttonInputs[key]) {
-            sendInput(buttonInputs[key]);
-          }
-        });
-      });
-
-      connectSessionNode.addEventListener("click", () => {
-        connectToSession(sessionPickerNode.value).catch((error) => {
-          setStatus("Connection failed");
-          console.error(error);
-        });
-      });
-
-      menuToggleNode.addEventListener("click", () => {
-        setMenuExpanded(!menuExpanded);
-        updateViewportMetrics();
-        resizeTerminal().catch((error) => console.error(error));
-      });
-
-      newSessionNode.addEventListener("click", () => {
-        createSession().catch((error) => {
-          setStatus("Connection failed");
-          console.error(error);
-        });
-      });
-
-      closeSessionNode.addEventListener("click", () => {
-        closeSelectedSession().catch((error) => {
-          setStatus("Close failed");
-          console.error(error);
-        });
-      });
-
-      window.addEventListener("resize", () => {
-        updateViewportMetrics();
-        resizeTerminal().catch((error) => console.error(error));
-      });
-
-      if (window.visualViewport) {
-        window.visualViewport.addEventListener("resize", () => {
-          updateViewportMetrics();
-          resizeTerminal().catch((error) => console.error(error));
-        });
-        window.visualViewport.addEventListener("scroll", () => {
-          updateViewportMetrics();
-        });
-      }
-
-      window.addEventListener("beforeunload", () => {
-        if (ws) {
-          ws.onclose = null;
-          ws.close();
-          ws = null;
-        }
-      });
-
-      async function initializePage() {
-        await listSessions();
-        const preferredSessionId = window.localStorage.getItem("saibai-terminal-session");
-        const availableSessionId = preferredSessionId && sessionList.some((session) => session.session_id === preferredSessionId)
-          ? preferredSessionId
-          : (sessionList[0] && sessionList[0].session_id);
-        if (availableSessionId) {
-          await connectToSession(availableSessionId);
-          return;
-        }
-        await createSession();
-      }
-
-      initializePage().catch((error) => {
-        setStatus("Connection failed");
-        terminal.writeln("[unable to start terminal]");
-        console.error(error);
-      });
-    </script>
-  </body>
-</html>
-"""
-
-DASHBOARD_PAGE = """<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Saibai Dashboard</title>
-    <link
-      rel="stylesheet"
-      href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css"
-    />
-    <style>
-      :root {
-        color-scheme: dark;
-        --page: #0b1020;
-        --panel: #11182d;
-        --border: #24304e;
-        --text: #dbe5ff;
-        --muted: #8ea1c9;
-        --accent: rgba(76, 112, 255, 0.28);
-        --accent-border: rgba(154, 176, 255, 0.6);
-      }
-
-      * { box-sizing: border-box; margin: 0; }
-
-      body {
-        height: 100dvh;
-        background:
-          radial-gradient(circle at top, rgba(76, 112, 255, 0.18), transparent 30%),
-          linear-gradient(180deg, #11162a 0%, var(--page) 65%);
-        color: var(--text);
-        font-family: "SFMono-Regular", "Menlo", "Monaco", monospace;
-        overflow: hidden;
-      }
-
-      .dashboard {
-        display: grid;
-        grid-template-columns: 320px minmax(0, 1fr);
-        height: 100dvh;
-        gap: 8px;
-        padding: 10px;
-        overflow: hidden;
-      }
-
-      .sidebar {
-        display: flex;
-        flex-direction: column;
-        gap: 8px;
-        min-height: 0;
-        overflow: hidden;
-      }
-
-      .sidebar__header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        padding: 10px 12px;
-        background: rgba(17, 24, 45, 0.92);
-        border: 1px solid var(--border);
-        border-radius: 12px;
-        backdrop-filter: blur(12px);
-        flex-shrink: 0;
-      }
-
-      .sidebar__title {
-        font-size: 11px;
-        letter-spacing: 0.06em;
-        text-transform: uppercase;
-      }
-
-      .btn {
-        border: 1px solid var(--border);
-        background: rgba(17, 24, 45, 0.92);
-        color: var(--text);
-        border-radius: 999px;
-        padding: 6px 12px;
-        font: inherit;
-        font-size: 11px;
-        line-height: 1;
-        cursor: pointer;
-      }
-
-      .btn:hover { background: var(--accent); border-color: var(--accent-border); }
-
-      .session-list {
-        flex: 1;
-        overflow-y: auto;
-        display: flex;
-        flex-direction: column;
-        gap: 6px;
-        min-width: 0;
-      }
-
-      .session-card {
-        padding: 10px 12px;
-        background: rgba(17, 24, 45, 0.92);
-        border: 1px solid var(--border);
-        border-radius: 10px;
-        cursor: pointer;
-        transition: border-color 0.15s, background 0.15s;
-        min-width: 0;
-      }
-
-      .session-card:hover { border-color: var(--accent-border); }
-
-      .session-card.is-active {
-        background: var(--accent);
-        border-color: var(--accent-border);
-      }
-
-      .session-card__label {
-        font-size: 12px;
-        font-weight: 600;
-        margin-bottom: 4px;
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        min-width: 0;
-      }
-
-      .session-card__label > span:first-child {
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        min-width: 0;
-      }
-
-      .session-card__meta {
-        font-size: 10px;
-        color: var(--muted);
-        display: flex;
-        gap: 10px;
-        flex-wrap: wrap;
-        overflow-wrap: break-word;
-        word-break: break-all;
-        min-width: 0;
-      }
-
-      .session-card__port a {
-        color: #7b9dff;
-        text-decoration: none;
-      }
-
-      .session-card__port a:hover { text-decoration: underline; }
-
-      .session-card__status {
-        display: inline-block;
-        width: 6px;
-        height: 6px;
-        border-radius: 50%;
-        background: #3ecf8e;
-      }
-
-      .session-card__status.is-closed { background: #f87171; }
-      .session-card__status.is-processing { background: #facc15; }
-
-      .session-card__rename {
-        background: rgba(10, 15, 30, 0.94);
-        border: 1px solid var(--accent-border);
-        color: var(--text);
-        font: inherit;
-        font-size: 11px;
-        border-radius: 4px;
-        padding: 1px 4px;
-        width: 100%;
-        outline: none;
-      }
-
-      .session-card__close {
-        background: none;
-        border: none;
-        color: var(--muted);
-        font-size: 14px;
-        cursor: pointer;
-        padding: 0 2px;
-        line-height: 1;
-      }
-
-      .session-card__close:hover { color: #f87171; }
-
-      .main-panel {
-        display: flex;
-        flex-direction: column;
-        min-height: 0;
-        min-width: 0;
-        gap: 8px;
-        overflow: hidden;
-      }
-
-      .terminal-container {
-        flex: 1;
-        min-height: 0;
-        padding: 8px;
-        background: rgba(10, 15, 30, 0.94);
-        border: 1px solid var(--border);
-        border-radius: 14px;
-        box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
-        overflow: hidden;
-        display: flex;
-        flex-direction: column;
-      }
-
-      .terminal-container.is-empty {
-        align-items: center;
-        justify-content: center;
-      }
-
-      .terminal-container.is-empty::after {
-        content: "Select or create a session";
-        color: var(--muted);
-        font-size: 13px;
-      }
-
-      #session-terminal {
-        width: 100%;
-        max-width: 100%;
-        flex: 1 1 0;
-        min-height: 0;
-        overflow: hidden;
-        position: relative;
-      }
-
-      #session-terminal .xterm { height: 100%; width: 100%; }
-
-      .terminal-bar {
-        display: flex;
-        gap: 8px;
-        align-items: center;
-        padding: 6px 8px;
-        flex-wrap: wrap;
-      }
-
-      .terminal-bar__keys {
-        display: flex;
-        gap: 6px;
-        flex-wrap: wrap;
-      }
-
-      .key-btn {
-        border: 1px solid var(--border);
-        background: rgba(17, 24, 45, 0.92);
-        color: var(--text);
-        border-radius: 999px;
-        padding: 4px 8px;
-        font: inherit;
-        font-size: 10px;
-        line-height: 1;
-        cursor: pointer;
-      }
-
-      .key-btn.is-active {
-        background: var(--accent);
-        border-color: var(--accent-border);
-      }
-
-      /* New session form */
-      .new-session-form {
-        display: none;
-        flex-direction: column;
-        gap: 6px;
-        padding: 10px 12px;
-        background: rgba(17, 24, 45, 0.92);
-        border: 1px solid var(--border);
-        border-radius: 10px;
-        flex-shrink: 0;
-      }
-
-      .new-session-form.is-visible { display: flex; }
-
-      .new-session-form label {
-        font-size: 10px;
-        color: var(--muted);
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
-      }
-
-      .new-session-form input {
-        border: 1px solid var(--border);
-        background: rgba(10, 15, 30, 0.94);
-        color: var(--text);
-        border-radius: 6px;
-        padding: 5px 8px;
-        font: inherit;
-        font-size: 11px;
-      }
-
-      .new-session-form__actions {
-        display: flex;
-        gap: 6px;
-        margin-top: 4px;
-      }
-
-      .suggestions {
-        position: absolute;
-        top: 100%;
-        left: 0;
-        right: 0;
-        max-height: 180px;
-        overflow-y: auto;
-        background: rgba(10, 15, 30, 0.98);
-        border: 1px solid var(--border);
-        border-radius: 6px;
-        z-index: 10;
-        margin-top: 2px;
-      }
-
-      .suggestions__item {
-        padding: 5px 8px;
-        font-size: 11px;
-        cursor: pointer;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-      }
-
-      .suggestions__item:hover,
-      .suggestions__item.is-selected {
-        background: var(--accent);
-      }
-
-      .back-btn {
-        display: none;
-      }
-
-      @media (max-width: 640px) {
-        .dashboard {
-          grid-template-columns: 1fr;
-          grid-template-rows: minmax(0, 1fr);
-        }
-
-        .sidebar {
-          min-height: 0;
-        }
-
-        .main-panel { display: none; }
-
-        .dashboard.is-terminal-view .sidebar { display: none; }
-        .dashboard.is-terminal-view .main-panel { display: flex; }
-
-        .back-btn {
-          display: inline-flex;
-          align-items: center;
-          gap: 4px;
-          border: 1px solid var(--border);
-          background: rgba(17, 24, 45, 0.92);
-          color: var(--text);
-          border-radius: 999px;
-          padding: 6px 12px;
-          font: inherit;
-          font-size: 11px;
-          line-height: 1;
-          cursor: pointer;
-          margin-bottom: 4px;
-        }
-
-        .back-btn:hover { background: var(--accent); }
-
-        .terminal-container {
-          border-radius: 10px;
-        }
-
-        .key-btn {
-          padding: 8px 12px;
-          font-size: 12px;
-        }
-
-        .session-card {
-          padding: 12px 14px;
-        }
-
-        .session-card__label { font-size: 13px; }
-        .session-card__meta { font-size: 11px; }
-        .session-card__close { font-size: 18px; padding: 4px 6px; }
-
-        .btn {
-          padding: 8px 14px;
-          font-size: 12px;
-        }
-      }
-    </style>
-  </head>
-  <body>
-    <div class="dashboard">
-      <aside class="sidebar">
-        <div class="sidebar__header">
-          <span class="sidebar__title">Sessions</span>
-          <button class="btn" id="toggle-new-form" type="button">+ New</button>
-        </div>
-        <div class="new-session-form" id="new-session-form">
-          <label>Label (optional)</label>
-          <input id="form-label" type="text" placeholder="my-feature" />
-          <label>Repository path (optional)</label>
-          <div style="position:relative">
-            <input id="form-repo" type="text" placeholder="/path/to/repo" autocomplete="off" />
-            <div id="repo-suggestions" class="suggestions" hidden></div>
-          </div>
-          <label>Branch (optional)</label>
-          <input id="form-branch" type="text" placeholder="feature/my-branch" />
-          <label>Port (auto-assigned)</label>
-          <input id="form-port" type="number" placeholder="4000" />
-          <div class="new-session-form__actions">
-            <button class="btn" id="form-create" type="button">Create</button>
-            <button class="btn" id="form-cancel" type="button">Cancel</button>
-          </div>
-        </div>
-        <div class="session-list" id="session-list"></div>
-      </aside>
-      <div class="main-panel">
-        <button class="back-btn" id="back-to-sessions" type="button">&#8592; Sessions</button>
-        <div class="terminal-container is-empty" id="terminal-container">
-          <div id="session-terminal"></div>
-        </div>
-        <div class="terminal-bar">
-          <div class="terminal-bar__keys">
-            <button class="key-btn" data-key="ctrl" type="button">Ctrl</button>
-            <button class="key-btn" data-key="esc" type="button">Esc</button>
-            <button class="key-btn" data-key="tab" type="button">Tab</button>
-            <button class="key-btn" data-key="up" type="button">Up</button>
-            <button class="key-btn" data-key="down" type="button">Down</button>
-            <button class="key-btn" data-key="left" type="button">Left</button>
-            <button class="key-btn" data-key="right" type="button">Right</button>
-          </div>
-        </div>
-      </div>
-    </div>
-    <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
-    <script>
-      const sessionListNode = document.getElementById("session-list");
-      const terminalContainerNode = document.getElementById("terminal-container");
-      const terminalNode = document.getElementById("session-terminal");
-      const toggleFormNode = document.getElementById("toggle-new-form");
-      const formNode = document.getElementById("new-session-form");
-      const formLabelNode = document.getElementById("form-label");
-      const formRepoNode = document.getElementById("form-repo");
-      const formBranchNode = document.getElementById("form-branch");
-      const formPortNode = document.getElementById("form-port");
-      const formCreateNode = document.getElementById("form-create");
-      const formCancelNode = document.getElementById("form-cancel");
-      const repoSuggestionsNode = document.getElementById("repo-suggestions");
-      const dashboardNode = document.querySelector(".dashboard");
-      const backBtnNode = document.getElementById("back-to-sessions");
-      const keyButtons = Array.from(document.querySelectorAll("[data-key]"));
-
-      let sessions = [];
-      let activeSessionId = null;
-      let ws = null;
-      let terminal = null;
-      let fitAddon = null;
-      let ctrlArmed = false;
-      let refreshTimer = null;
-      const buttonInputs = {
-        esc: "\\x1b",
-        tab: "\\t",
-        up: "\\x1b[A",
-        down: "\\x1b[B",
-        left: "\\x1b[D",
-        right: "\\x1b[C"
-      };
-
-      async function sendJson(url, method, payload) {
-        const response = await fetch(url, {
-          method,
-          headers: { "Content-Type": "application/json" },
-          body: payload ? JSON.stringify(payload) : undefined
-        });
-        if (!response.ok) throw new Error("Request failed: " + response.status);
-        return response.json();
-      }
-
-      function sendInput(data) {
-        if (ws && ws.readyState === WebSocket.OPEN) ws.send(data);
-      }
-
-      function useCtrlModifier(data) {
-        if (!ctrlArmed || !data || data.length !== 1) return data;
-        ctrlArmed = false;
-        updateCtrlState();
-        const code = data.toUpperCase().charCodeAt(0);
-        if (code >= 64 && code <= 95) return String.fromCharCode(code - 64);
-        return data;
-      }
-
-      function updateCtrlState() {
-        keyButtons.forEach(function(btn) {
-          if (btn.dataset.key === "ctrl") btn.classList.toggle("is-active", ctrlArmed);
-        });
-      }
-
-      function formatTime(timestamp) {
-        const date = new Date(timestamp * 1000);
-        return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-      }
-
-      // --- Repo path autocomplete ---
-
-      let repoDebounce = null;
-
-      function showRepoSuggestions(paths) {
-        repoSuggestionsNode.replaceChildren();
-        if (paths.length === 0) {
-          repoSuggestionsNode.hidden = true;
-          return;
-        }
-        paths.forEach(function(p) {
-          const item = document.createElement("div");
-          item.className = "suggestions__item";
-          item.textContent = p;
-          item.addEventListener("mousedown", function(event) {
-            event.preventDefault();
-            formRepoNode.value = p + "/";
-            repoSuggestionsNode.hidden = true;
-            formRepoNode.focus();
-            formRepoNode.dispatchEvent(new Event("input"));
-          });
-          repoSuggestionsNode.appendChild(item);
-        });
-        repoSuggestionsNode.hidden = false;
-      }
-
-      formRepoNode.addEventListener("input", function() {
-        clearTimeout(repoDebounce);
-        const value = formRepoNode.value;
-        if (!value || value.length < 2) {
-          repoSuggestionsNode.hidden = true;
-          return;
-        }
-        repoDebounce = setTimeout(async function() {
-          try {
-            const payload = await sendJson("/api/paths?prefix=" + encodeURIComponent(value), "GET");
-            showRepoSuggestions(payload.paths);
-          } catch (e) {
-            repoSuggestionsNode.hidden = true;
-          }
-        }, 150);
-      });
-
-      formRepoNode.addEventListener("blur", function() {
-        setTimeout(function() { repoSuggestionsNode.hidden = true; }, 200);
-      });
-
-      // --- Session list rendering ---
-
-      function renderSessionList() {
-        sessionListNode.replaceChildren();
-        sessions.forEach(function(session) {
-          const card = document.createElement("div");
-          card.className = "session-card";
-          if (session.session_id === activeSessionId) card.className += " is-active";
-
-          const labelRow = document.createElement("div");
-          labelRow.className = "session-card__label";
-
-          const labelLeft = document.createElement("span");
-          const statusDot = document.createElement("span");
-          var dotClass = "session-card__status";
-          if (session.closed) dotClass += " is-closed";
-          else if (session.status === "processing") dotClass += " is-processing";
-          statusDot.className = dotClass;
-          labelLeft.appendChild(statusDot);
-          var labelText = " " + session.label;
-          if (session.status === "processing") labelText += " (processing…)";
-          if (session.cwd) labelText += " — " + session.cwd.split("/").pop();
-          const labelTextNode = document.createTextNode(labelText);
-          labelLeft.appendChild(labelTextNode);
-          labelLeft.addEventListener("dblclick", function(event) {
-            event.stopPropagation();
-            var input = document.createElement("input");
-            input.type = "text";
-            input.value = session.label;
-            input.className = "session-card__rename";
-            labelLeft.replaceChild(input, labelTextNode);
-            input.focus();
-            input.select();
-            function commit() {
-              var newLabel = input.value.trim();
-              if (newLabel && newLabel !== session.label) {
-                sendJson("/api/sessions/" + session.session_id + "/rename", "POST", { label: newLabel })
-                  .then(function() { refreshSessions(); })
-                  .catch(console.error);
-              } else {
-                renderSessionList();
-              }
-            }
-            input.addEventListener("keydown", function(e) {
-              if (e.key === "Enter") { e.preventDefault(); commit(); }
-              if (e.key === "Escape") { e.preventDefault(); renderSessionList(); }
-            });
-            input.addEventListener("blur", commit);
-          });
-          labelRow.appendChild(labelLeft);
-
-          const closeBtn = document.createElement("button");
-          closeBtn.className = "session-card__close";
-          closeBtn.textContent = "\\u00d7";
-          closeBtn.title = "Close session";
-          closeBtn.addEventListener("click", function(event) {
-            event.stopPropagation();
-            closeSession(session.session_id);
-          });
-          labelRow.appendChild(closeBtn);
-
-          const meta = document.createElement("div");
-          meta.className = "session-card__meta";
-          meta.innerHTML = formatTime(session.created_at);
-          if (session.port) {
-            const portSpan = document.createElement("span");
-            portSpan.className = "session-card__port";
-            const portLink = document.createElement("a");
-            portLink.href = window.location.protocol + "//" + window.location.hostname + ":" + session.port;
-            portLink.target = "_blank";
-            portLink.textContent = ":" + session.port;
-            portLink.addEventListener("click", function(event) { event.stopPropagation(); });
-            portSpan.appendChild(portLink);
-            meta.appendChild(portSpan);
-          }
-          if (session.worktree_path) {
-            const branchSpan = document.createElement("span");
-            branchSpan.textContent = session.worktree_path.split("/").pop();
-            meta.appendChild(branchSpan);
-          }
-
-          card.appendChild(labelRow);
-          card.appendChild(meta);
-
-          card.addEventListener("click", function() {
-            connectToSession(session.session_id);
-          });
-
-          sessionListNode.appendChild(card);
-        });
-      }
-
-      async function refreshSessions() {
-        const payload = await sendJson("/api/sessions", "GET");
-        sessions = payload.sessions;
-        renderSessionList();
-      }
-
-      async function closeSession(sessionId) {
-        await sendJson("/api/sessions/" + sessionId, "DELETE");
-        if (activeSessionId === sessionId) {
-          disconnectTerminal();
-        }
-        await refreshSessions();
-      }
-
-      // --- Terminal management ---
-
-      function createTerminal() {
-        if (terminal) return;
-        terminalContainerNode.classList.remove("is-empty");
-        if (typeof window.Terminal === "function") {
-          terminal = new Terminal({
-            cursorBlink: true,
-            fontSize: 12,
-            theme: {
-              background: "#0a0f1e",
-              foreground: "#dbe5ff",
-              cursor: "#9ab0ff",
-              black: "#101828",
-              brightBlack: "#51607b"
-            }
-          });
-          if (window.FitAddon && typeof window.FitAddon.FitAddon === "function") {
-            fitAddon = new FitAddon.FitAddon();
-            terminal.loadAddon(fitAddon);
-          }
-          terminal.open(terminalNode);
-          terminal.onData(function(data) {
-            if (activeSessionId) sendInput(useCtrlModifier(data));
-          });
-        }
-      }
-
-      function fitTerminal() {
-        if (fitAddon) fitAddon.fit();
-      }
-
-      function disconnectTerminal() {
-        if (ws) {
-          ws.onclose = null;
-          ws.close();
-          ws = null;
-        }
-        activeSessionId = null;
-        if (terminal) {
-          terminal.clear();
-        }
-        terminalContainerNode.classList.add("is-empty");
-        dashboardNode.classList.remove("is-terminal-view");
-        renderSessionList();
-      }
-
-      async function connectToSession(sessionId) {
-        if (activeSessionId === sessionId) return;
-        if (ws) {
-          ws.onclose = null;
-          ws.close();
-          ws = null;
-        }
-        createTerminal();
-        if (terminal) terminal.clear();
-        activeSessionId = sessionId;
-        dashboardNode.classList.add("is-terminal-view");
-        renderSessionList();
-
-        fitTerminal();
-        const cols = terminal ? Math.max(terminal.cols, 20) : 120;
-        const rows = terminal ? Math.max(terminal.rows, 8) : 32;
-        await sendJson("/api/sessions/" + sessionId + "/resize", "POST", { cols, rows });
-
-        const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-        const url = protocol + "//" + window.location.host + "/api/sessions/" + sessionId + "/ws";
-        ws = new WebSocket(url);
-        ws.onmessage = function(event) {
-          if (terminal) terminal.write(event.data);
-        };
-        ws.onclose = function() {
-          if (activeSessionId === sessionId) {
-            if (terminal) {
-              terminal.writeln("");
-              terminal.writeln("[session disconnected]");
-            }
-            refreshSessions().catch(console.error);
-          }
-        };
-        ws.onerror = function(err) {
-          console.error("WebSocket error:", err);
-        };
-      }
-
-      // --- New session form ---
-
-      toggleFormNode.addEventListener("click", function() {
-        formNode.classList.toggle("is-visible");
-      });
-
-      formCancelNode.addEventListener("click", function() {
-        formNode.classList.remove("is-visible");
-      });
-
-      formCreateNode.addEventListener("click", async function() {
-        const body = {};
-        const label = formLabelNode.value.trim();
-        const repo = formRepoNode.value.trim();
-        const branch = formBranchNode.value.trim();
-        const port = formPortNode.value.trim();
-        if (label) body.label = label;
-        if (repo) body.repo_path = repo;
-        if (branch) body.branch = branch;
-        if (port) body.port = parseInt(port, 10);
-        const payload = await sendJson("/api/sessions", "POST", Object.keys(body).length ? body : undefined);
-        formLabelNode.value = "";
-        formBranchNode.value = "";
-        formPortNode.value = "";
-        formNode.classList.remove("is-visible");
-        await refreshSessions();
-        connectToSession(payload.session_id);
-      });
-
-      // --- Back button (mobile) ---
-
-      backBtnNode.addEventListener("click", function() {
-        disconnectTerminal();
-      });
-
-      // --- Key buttons ---
-
-      keyButtons.forEach(function(btn) {
-        btn.addEventListener("click", function() {
-          const key = btn.dataset.key;
-          if (key === "ctrl") {
-            ctrlArmed = !ctrlArmed;
-            updateCtrlState();
-            return;
-          }
-          if (activeSessionId && buttonInputs[key]) sendInput(buttonInputs[key]);
-        });
-      });
-
-      // --- Resize handling ---
-
-      async function handleResize() {
-        if (!activeSessionId || !terminal) return;
-        fitTerminal();
-        const cols = Math.max(terminal.cols, 20);
-        const rows = Math.max(terminal.rows, 8);
-        await sendJson("/api/sessions/" + activeSessionId + "/resize", "POST", { cols, rows });
-      }
-
-      window.addEventListener("resize", function() {
-        handleResize().catch(console.error);
-      });
-
-      if (window.visualViewport) {
-        window.visualViewport.addEventListener("resize", function() {
-          handleResize().catch(console.error);
-        });
-      }
-
-      // --- Auto-refresh session list ---
-
-      refreshTimer = setInterval(function() {
-        refreshSessions().catch(console.error);
-      }, 5000);
-
-      // --- SSE notifications with audio ---
-
-      var notifySound = new Audio("/api/sounds/glass");
-      notifySound.load();
-      document.addEventListener("click", function unlockAudio() {
-        notifySound.volume = 0;
-        notifySound.play().then(function() {
-          notifySound.pause();
-          notifySound.currentTime = 0;
-          notifySound.volume = 1;
-          document.removeEventListener("click", unlockAudio);
-        }).catch(function() {});
-      });
-
-      var eventSource = new EventSource("/api/events");
-      eventSource.onmessage = function(event) {
-        var data = JSON.parse(event.data);
-        if (data.event === "done") {
-          notifySound.currentTime = 0;
-          notifySound.play().catch(function(e) { console.warn("audio play failed:", e); });
-        }
-        refreshSessions().catch(console.error);
-      };
-
-      // --- Initialize ---
-
-      refreshSessions().catch(console.error);
-    </script>
-  </body>
-</html>
-"""
 
 
 class TerminalSession:
@@ -1577,6 +104,9 @@ class TerminalSession:
         self._output_ready = threading.Condition(self._lock)
         self._input_pending = ""
         self._input_flusher = None
+        self._pending_esc = ""
+        self._oob_subscribers: list = []
+        self._oob_lock = threading.Lock()
         self._tmux_name = TMUX_SESSION_PREFIX + self.session_id
         self._create_tmux_session(shell, cwd, cols, rows)
         self._start_output_pipe()
@@ -1599,6 +129,9 @@ class TerminalSession:
         obj._output_ready = threading.Condition(obj._lock)
         obj._input_pending = ""
         obj._input_flusher = None
+        obj._pending_esc = ""
+        obj._oob_subscribers = []
+        obj._oob_lock = threading.Lock()
         obj._tmux_name = TMUX_SESSION_PREFIX + session_id
         info = subprocess.run(
             [TMUX_BIN, "display-message", "-t", obj._tmux_name, "-p",
@@ -1656,7 +189,7 @@ class TerminalSession:
 
     def _start_output_pipe(self) -> None:
         """Set up a named pipe to stream pane output."""
-        self._fifo_path = f"/tmp/termweb-{self.session_id}.pipe"
+        self._fifo_path = f"/tmp/termweb-{os.getpid()}-{self.session_id}.pipe"
         try:
             os.mkfifo(self._fifo_path)
         except FileExistsError:
@@ -1690,6 +223,27 @@ class TerminalSession:
                 "data": data,
                 "closed": self._closed,
             }
+
+    def tail_cursor(self, n_lines: int) -> int:
+        """Return a buffer cursor that begins at the last n_lines of output."""
+        with self._lock:
+            buf = self._buffer
+        if not buf or n_lines <= 0:
+            return len(buf)
+        idx = len(buf)
+        if buf[idx - 1] == "\n":
+            idx -= 1
+        for _ in range(n_lines):
+            nl = buf.rfind("\n", 0, idx)
+            if nl == -1:
+                return 0
+            idx = nl
+        return idx + 1
+
+    def full_buffer(self) -> str:
+        """Return the full accumulated output buffer."""
+        with self._lock:
+            return self._buffer
 
     def write(self, data: str) -> None:
         if not data:
@@ -1794,6 +348,66 @@ class TerminalSession:
             "closed": closed,
         }
 
+    def subscribe_oob(self, callback) -> None:
+        with self._oob_lock:
+            self._oob_subscribers.append(callback)
+
+    def unsubscribe_oob(self, callback) -> None:
+        with self._oob_lock:
+            try:
+                self._oob_subscribers.remove(callback)
+            except ValueError:
+                pass
+
+    def _broadcast_oob(self, data: str) -> None:
+        with self._oob_lock:
+            subs = list(self._oob_subscribers)
+        for cb in subs:
+            try:
+                cb(data)
+            except Exception:
+                pass
+
+    _ITERM2_START = "\x1b]1337;"
+
+    def _split_iterm2(self, raw: str) -> "Tuple[str, list]":
+        """Split a chunk into (normal_text, [oob_sequences]).
+
+        Carries partial escape sequences across chunks via self._pending_esc.
+        """
+        data = self._pending_esc + raw
+        self._pending_esc = ""
+        start = self._ITERM2_START
+        text_parts = []
+        oob_parts = []
+        i = 0
+        n = len(data)
+        while i < n:
+            j = data.find(start, i)
+            if j == -1:
+                safe_end = n
+                tail_begin = max(i, n - len(start) + 1)
+                for k in range(tail_begin, n):
+                    if start.startswith(data[k:]):
+                        safe_end = k
+                        self._pending_esc = data[k:]
+                        break
+                text_parts.append(data[i:safe_end])
+                return "".join(text_parts), oob_parts
+            text_parts.append(data[i:j])
+            k = j + len(start)
+            bel = data.find("\x07", k)
+            st = data.find("\x1b\\", k)
+            candidates = [x for x in (bel, st) if x != -1]
+            if not candidates:
+                self._pending_esc = data[j:]
+                return "".join(text_parts), oob_parts
+            term_pos = min(candidates)
+            term_len = 1 if term_pos == bel else 2
+            oob_parts.append(data[j:term_pos + term_len])
+            i = term_pos + term_len
+        return "".join(text_parts), oob_parts
+
     def _read_output(self) -> None:
         """Read pane output from the named pipe."""
         try:
@@ -1811,10 +425,14 @@ class TerminalSession:
                 if not chunk:
                     time.sleep(0.05)
                     continue
-                text = chunk.decode("utf-8", errors="replace")
-                with self._output_ready:
-                    self._buffer += text
-                    self._output_ready.notify_all()
+                raw = chunk.decode("utf-8", errors="replace")
+                text, oob_seqs = self._split_iterm2(raw)
+                if text:
+                    with self._output_ready:
+                        self._buffer += text
+                        self._output_ready.notify_all()
+                for seq in oob_seqs:
+                    self._broadcast_oob(seq)
         finally:
             with self._output_ready:
                 self._closed = True
@@ -1823,6 +441,7 @@ class TerminalSession:
 
 WS_MAGIC = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 WS_OP_TEXT = 0x1
+WS_OP_BINARY = 0x2
 WS_OP_CLOSE = 0x8
 WS_OP_PING = 0x9
 WS_OP_PONG = 0xA
@@ -1890,25 +509,52 @@ def _ws_read_exact(sock, count: int) -> Optional[bytes]:
     return buf
 
 
-def ws_relay(sock, reader, session: "TerminalSession") -> None:
+WS_BIN_META = 0x00  # typed binary frame: JSON cursor metadata
+WS_BIN_OOB = 0x01   # typed binary frame: out-of-band terminal data (write, don't count)
+
+
+def ws_relay(sock, reader, session: "TerminalSession", cursor_hint: Optional[int] = None) -> None:
     """Relay data between a WebSocket and a PTY session until either side closes."""
-    cursor = 0
+    with session._lock:
+        buffer_len = len(session._buffer)
+    tail_start = session.tail_cursor(DEFAULT_TAIL_LINES)
+    if cursor_hint is not None and 0 <= cursor_hint <= buffer_len:
+        cursor = max(cursor_hint, tail_start)
+    else:
+        cursor = tail_start
+
+    send_lock = threading.Lock()
+    dead = [False]
+
+    def send(op: int, payload: bytes) -> bool:
+        if dead[0]:
+            return False
+        with send_lock:
+            try:
+                ws_send_frame(sock, op, payload)
+                return True
+            except OSError:
+                dead[0] = True
+                return False
+
+    if not send(WS_OP_BINARY, bytes([WS_BIN_META]) + json.dumps({"cursor": cursor}).encode("utf-8")):
+        return
+
+    def on_oob(seq: str) -> None:
+        send(WS_OP_BINARY, bytes([WS_BIN_OOB]) + seq.encode("utf-8"))
+
+    session.subscribe_oob(on_oob)
 
     def send_output():
         nonlocal cursor
-        while not session._closed:
+        while not session._closed and not dead[0]:
             result = session.read(cursor=cursor, timeout=0.5)
             cursor = result["cursor"]
             if result["data"]:
-                try:
-                    ws_send_frame(sock, WS_OP_TEXT, result["data"].encode("utf-8"))
-                except OSError:
+                if not send(WS_OP_TEXT, result["data"].encode("utf-8")):
                     return
             if result["closed"]:
-                try:
-                    ws_send_frame(sock, WS_OP_CLOSE, b"")
-                except OSError:
-                    pass
+                send(WS_OP_CLOSE, b"")
                 return
 
     output_thread = threading.Thread(target=send_output, daemon=True)
@@ -1923,16 +569,15 @@ def ws_relay(sock, reader, session: "TerminalSession") -> None:
             if opcode == WS_OP_TEXT:
                 session.write(payload.decode("utf-8", errors="replace"))
             elif opcode == WS_OP_PING:
-                ws_send_frame(sock, WS_OP_PONG, payload)
+                send(WS_OP_PONG, payload)
             elif opcode == WS_OP_CLOSE:
-                try:
-                    ws_send_frame(sock, WS_OP_CLOSE, b"")
-                except OSError:
-                    pass
+                send(WS_OP_CLOSE, b"")
                 break
     except OSError:
         pass
     finally:
+        dead[0] = True
+        session.unsubscribe_oob(on_oob)
         output_thread.join(timeout=2.0)
 
 
@@ -1953,11 +598,19 @@ def ws_handle_connection(conn, service, data=None):
             if ": " in line:
                 key, value = line.split(": ", 1)
                 headers[key.lower()] = value
-        parts = path.strip("/").split("/")
+        parsed_path = urlparse(path)
+        parts = parsed_path.path.strip("/").split("/")
         if len(parts) < 4 or parts[0] != "api" or parts[1] != "sessions" or parts[3] != "ws":
             conn.sendall(b"HTTP/1.1 400 Bad Request\r\n\r\n")
             return
         session_id = parts[2]
+        query = parse_qs(parsed_path.query)
+        cursor_hint: Optional[int] = None
+        if "cursor" in query:
+            try:
+                cursor_hint = int(query["cursor"][0])
+            except (ValueError, IndexError):
+                cursor_hint = None
         client_key = headers.get("sec-websocket-key", "")
         if not client_key:
             conn.sendall(b"HTTP/1.1 400 Bad Request\r\n\r\n")
@@ -1976,7 +629,7 @@ def ws_handle_connection(conn, service, data=None):
             "\r\n"
         ).encode()
         conn.sendall(response)
-        ws_relay(conn, conn, session)
+        ws_relay(conn, conn, session, cursor_hint=cursor_hint)
     except OSError:
         pass
     finally:
@@ -1995,11 +648,13 @@ class WebTerminalServer:
         port: int = DEFAULT_PORT,
         shell: Optional[str] = None,
         cwd: Optional[str] = None,
+        static_dir: Optional[Path] = None,
     ):
         self.host = host
         self.port = port
         self.shell = shell or os.environ.get("SHELL") or "/bin/sh"
         self.cwd = cwd or str(Path.home())
+        self.static_dir = Path(static_dir) if static_dir else DEFAULT_STATIC_DIR
         self._httpd: Optional[ThreadingHTTPServer] = None
         self._running = False
         self._sessions: Dict[str, TerminalSession] = {}
@@ -2009,6 +664,36 @@ class WebTerminalServer:
 
     def is_running(self) -> bool:
         return self._running
+
+    def _cleanup_orphan_pipes(self) -> None:
+        """Remove /tmp/termweb-*.pipe files whose owning server process is gone."""
+        try:
+            entries = os.listdir("/tmp")
+        except OSError:
+            return
+        for name in entries:
+            if not (name.startswith("termweb-") and name.endswith(".pipe")):
+                continue
+            middle = name[len("termweb-"):-len(".pipe")]
+            pid_str, _, _ = middle.partition("-")
+            path = os.path.join("/tmp", name)
+            try:
+                pid = int(pid_str)
+            except ValueError:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+                continue
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+            except PermissionError:
+                continue
 
     def _recover_sessions(self) -> None:
         """Discover existing tmux sessions and reattach to them."""
@@ -2039,6 +724,7 @@ class WebTerminalServer:
         class TerminalHTTPServer(ThreadingHTTPServer):
             daemon_threads = True
 
+        self._cleanup_orphan_pipes()
         self._recover_sessions()
         self._httpd = TerminalHTTPServer((self.host, self.port), TerminalRequestHandler)
         self._httpd.service = self
@@ -2249,10 +935,10 @@ class TerminalRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/":
-            self._send_html(TERMINAL_PAGE)
+            self._send_static_html("terminal.html")
             return
         if parsed.path == "/dashboard":
-            self._send_html(DASHBOARD_PAGE)
+            self._send_static_html("dashboard.html")
             return
         if parsed.path == "/api/sessions":
             self._send_json(self.service.list_sessions())
@@ -2279,6 +965,22 @@ class TerminalRequestHandler(BaseHTTPRequestHandler):
                 self._send_error(HTTPStatus.NOT_FOUND, "Session not found")
                 return
             self._send_json(payload)
+            return
+        if parsed.path.startswith("/api/sessions/") and parsed.path.endswith("/history"):
+            session_id = parsed.path.split("/")[3]
+            try:
+                session = self.service._get_session(session_id)
+            except KeyError:
+                self._send_error(HTTPStatus.NOT_FOUND, "Session not found")
+                return
+            body = session.full_buffer().encode("utf-8")
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
             return
         self._send_error(HTTPStatus.NOT_FOUND, "Route not found")
 
@@ -2389,6 +1091,15 @@ class TerminalRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(encoded)
 
+    def _send_static_html(self, name: str) -> None:
+        path = self.service.static_dir / name
+        try:
+            body = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            self._send_error(HTTPStatus.NOT_FOUND, f"Static file not found: {name}")
+            return
+        self._send_html(body)
+
     def _send_json(self, payload: Dict[str, object], status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
@@ -2463,6 +1174,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--shell", default=None)
     parser.add_argument("--cwd", default=None)
+    parser.add_argument("--static-dir", default=None,
+                        help="Directory containing terminal.html and dashboard.html")
     return parser
 
 
@@ -2474,6 +1187,7 @@ def main() -> None:
         port=args.port,
         shell=args.shell,
         cwd=args.cwd,
+        static_dir=args.static_dir,
     )
     try:
         server.serve_forever()

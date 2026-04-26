@@ -576,6 +576,9 @@ def test_dashboard_page_served(terminal_server):
     assert 'id="settings-menu"' in body
     assert 'id="settings-ntfy-url"' in body
     assert "session-card__notify" in body
+    assert "session-card__notify-error" in body
+    assert 'PHONE_NOTIFICATION_STATUS_FAILED = "failed"' in body
+    assert "session.phone_notification_status === PHONE_NOTIFICATION_STATUS_FAILED" in body
     assert "/api/settings" in body
 
 
@@ -679,7 +682,7 @@ def test_notify_posts_to_ntfy_only_for_enabled_sessions(terminal_server):
         time.sleep(0.2)
         assert ntfy_server.requests == []
 
-        http_request(
+        _, notify_payload = http_request(
             f"{base_url}/api/sessions/{session_id}/notify",
             method="POST",
             payload={"event": "done"},
@@ -695,10 +698,50 @@ def test_notify_posts_to_ntfy_only_for_enabled_sessions(terminal_server):
         assert request["headers"]["Title"] == "Termweb"
         assert request["headers"]["Tags"] == "termweb"
         assert request["headers"]["Cache"] == "no"
+        assert notify_payload["phone_notification"]["status"] == "sent"
+
+        _, sessions = http_request(f"{base_url}/api/sessions")
+        match = [s for s in sessions["sessions"] if s["session_id"] == session_id]
+        assert match[0]["phone_notification_status"] == "sent"
+        assert match[0]["phone_notification_error"] == ""
     finally:
         ntfy_server.shutdown()
         ntfy_server.server_close()
         ntfy_thread.join(timeout=OUTPUT_TIMEOUT_SECONDS)
+
+
+def test_notify_reports_ntfy_publish_failure(terminal_server):
+    """POST /notify reports ntfy publish errors for enabled sessions."""
+    server, port = terminal_server
+    base_url = f"http://{server.host}:{port}"
+    unused_port = get_free_port()
+
+    http_request(
+        f"{base_url}/api/settings",
+        method="POST",
+        payload={"ntfy_url": f"http://{DEFAULT_HOST}:{unused_port}/termweb-topic"},
+    )
+    _, session_payload = http_request(f"{base_url}/api/sessions", method="POST")
+    session_id = session_payload["session_id"]
+    http_request(
+        f"{base_url}/api/sessions/{session_id}/notifications",
+        method="POST",
+        payload={"enabled": True},
+    )
+
+    _, payload = http_request(
+        f"{base_url}/api/sessions/{session_id}/notify",
+        method="POST",
+        payload={"event": "done"},
+    )
+
+    assert payload["phone_notification"]["status"] == "failed"
+    assert payload["phone_notification"]["error"]
+
+    _, sessions = http_request(f"{base_url}/api/sessions")
+    match = [s for s in sessions["sessions"] if s["session_id"] == session_id]
+    assert match[0]["phone_notification_status"] == "failed"
+    assert match[0]["phone_notification_error"]
 
 
 def test_notify_sets_session_status(terminal_server):

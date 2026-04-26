@@ -163,6 +163,11 @@
         accent-color: #7b9dff;
       }
 
+      .session-card__notify-error {
+        color: #f87171;
+        font-size: 11px;
+      }
+
       .session-card__status {
         display: inline-block;
         width: 6px;
@@ -489,6 +494,9 @@
       const backBtnNode = document.getElementById("back-to-sessions");
       const fullHistoryNode = document.getElementById("full-history");
       const keyButtons = Array.from(document.querySelectorAll("[data-key]"));
+      const PHONE_NOTIFICATION_STATUS_FAILED = "failed";
+      const PHONE_NOTIFICATION_FAILED_LABEL = "failed";
+      const PHONE_NOTIFICATION_FAILED_TITLE = "Notification failed";
 
       let sessions = [];
       let settings = { ntfy_url: "" };
@@ -718,6 +726,13 @@
             notifyLabel.appendChild(notifyInput);
             notifyLabel.appendChild(document.createTextNode(" Phone"));
             meta.appendChild(notifyLabel);
+            if (session.phone_notification_status === PHONE_NOTIFICATION_STATUS_FAILED) {
+              const notifyError = document.createElement("span");
+              notifyError.className = "session-card__notify-error";
+              notifyError.title = session.phone_notification_error || PHONE_NOTIFICATION_FAILED_TITLE;
+              notifyError.textContent = PHONE_NOTIFICATION_FAILED_LABEL;
+              meta.appendChild(notifyError);
+            }
           }
 
           card.appendChild(labelRow);

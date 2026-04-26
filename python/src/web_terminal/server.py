@@ -18,6 +18,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Dict, Optional
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
@@ -42,6 +43,12 @@ NTFY_CONTENT_TYPE = "text/plain; charset=utf-8"
 NTFY_DONE_EVENT = "done"
 NTFY_TIMEOUT_SECONDS = 2.0
 NTFY_DONE_MESSAGE = 'Session "{label}" is done.'
+PHONE_NOTIFICATION_STATUS_IDLE = "idle"
+PHONE_NOTIFICATION_STATUS_DISABLED = "disabled"
+PHONE_NOTIFICATION_STATUS_SENT = "sent"
+PHONE_NOTIFICATION_STATUS_FAILED = "failed"
+PHONE_NOTIFICATION_ERROR_NONE = ""
+PHONE_NOTIFICATION_MISSING_URL_ERROR = "ntfy URL is not configured"
 TMUX_BIN = (
     shutil.which("tmux")
     or shutil.which("tmux", path="/opt/homebrew/bin:/usr/local/bin:/usr/bin")
@@ -124,6 +131,8 @@ class TerminalSession:
         self.worktree_path = worktree_path
         self.server_url = server_url
         self.phone_notifications_enabled = phone_notifications_enabled
+        self.phone_notification_status = PHONE_NOTIFICATION_STATUS_IDLE
+        self.phone_notification_error = PHONE_NOTIFICATION_ERROR_NONE
         self.created_at = time.time()
         self.status = "idle"
         self._buffer = ""
@@ -152,6 +161,8 @@ class TerminalSession:
         obj.worktree_path = None
         obj.server_url = None
         obj.phone_notifications_enabled = False
+        obj.phone_notification_status = PHONE_NOTIFICATION_STATUS_IDLE
+        obj.phone_notification_error = PHONE_NOTIFICATION_ERROR_NONE
         obj.created_at = time.time()
         obj.status = "idle"
         obj._closed = False
@@ -376,6 +387,8 @@ class TerminalSession:
             "created_at": self.created_at,
             "status": self.status,
             "phone_notifications_enabled": self.phone_notifications_enabled,
+            "phone_notification_status": self.phone_notification_status,
+            "phone_notification_error": self.phone_notification_error,
             "closed": closed,
         }
 
@@ -925,15 +938,26 @@ class WebTerminalServer:
             phone_notifications_enabled = session.phone_notifications_enabled
             label = session.label
         self._broadcast_sse({"session_id": session_id, "event": event})
+        phone_notification = {
+            "status": PHONE_NOTIFICATION_STATUS_DISABLED,
+            "error": PHONE_NOTIFICATION_ERROR_NONE,
+        }
         if event == NTFY_DONE_EVENT and phone_notifications_enabled:
-            self._publish_ntfy_done(label)
-        return {"ok": True}
+            phone_notification = self._publish_ntfy_done(label)
+        with session._lock:
+            if event == NTFY_DONE_EVENT:
+                session.phone_notification_status = phone_notification["status"]
+                session.phone_notification_error = phone_notification["error"]
+        return {"ok": True, "phone_notification": phone_notification}
 
-    def _publish_ntfy_done(self, label: str) -> None:
+    def _publish_ntfy_done(self, label: str) -> Dict[str, str]:
         with self._settings_lock:
             ntfy_url = self._settings.get(SETTINGS_NTFY_URL_KEY, DEFAULT_NTFY_URL)
         if not ntfy_url:
-            return
+            return {
+                "status": PHONE_NOTIFICATION_STATUS_FAILED,
+                "error": PHONE_NOTIFICATION_MISSING_URL_ERROR,
+            }
         message = NTFY_DONE_MESSAGE.format(label=label)
         request = Request(
             ntfy_url,
@@ -949,8 +973,25 @@ class WebTerminalServer:
         try:
             with urlopen(request, timeout=NTFY_TIMEOUT_SECONDS) as response:
                 response.read()
-        except OSError:
-            return
+        except HTTPError as exc:
+            return {
+                "status": PHONE_NOTIFICATION_STATUS_FAILED,
+                "error": f"HTTP {exc.code}: {exc.reason}",
+            }
+        except URLError as exc:
+            return {
+                "status": PHONE_NOTIFICATION_STATUS_FAILED,
+                "error": str(exc.reason),
+            }
+        except OSError as exc:
+            return {
+                "status": PHONE_NOTIFICATION_STATUS_FAILED,
+                "error": str(exc),
+            }
+        return {
+            "status": PHONE_NOTIFICATION_STATUS_SENT,
+            "error": PHONE_NOTIFICATION_ERROR_NONE,
+        }
 
     def _broadcast_sse(self, data: dict) -> None:
         """Send an event to all connected SSE clients."""

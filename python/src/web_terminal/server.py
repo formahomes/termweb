@@ -29,12 +29,14 @@ DEFAULT_ROWS = 32
 DEFAULT_OUTPUT_TIMEOUT = 0.25
 DEFAULT_READ_SIZE = 4096
 PROCESS_EXIT_TIMEOUT = 1.0
+SERVER_SHUTDOWN_TIMEOUT = 2.0
 INPUT_BATCH_DELAY = 0.01
 DEFAULT_TAIL_LINES = 2000
 SESSION_PORT_BASE = 4000
 TMUX_SESSION_PREFIX = "termweb-"
 DEFAULT_SETTINGS_PATH = Path.home() / ".termweb-runtime" / "settings.json"
 SETTINGS_NTFY_URL_KEY = "ntfy_url"
+SETTINGS_SESSION_NOTIFICATIONS_KEY = "session_notifications"
 DEFAULT_NTFY_URL = ""
 NTFY_TITLE = "Termweb"
 NTFY_TAGS = "termweb"
@@ -149,7 +151,8 @@ class TerminalSession:
         self._start_output_pipe()
 
     @classmethod
-    def recover(cls, session_id: str, shell: str, cwd: str) -> "TerminalSession":
+    def recover(cls, session_id: str, shell: str, cwd: str,
+                phone_notifications_enabled: bool = False) -> "TerminalSession":
         """Reattach to an existing tmux session without creating a new one."""
         obj = cls.__new__(cls)
         obj.shell = shell
@@ -160,7 +163,7 @@ class TerminalSession:
         obj.repo_path = None
         obj.worktree_path = None
         obj.server_url = None
-        obj.phone_notifications_enabled = False
+        obj.phone_notifications_enabled = phone_notifications_enabled
         obj.phone_notification_status = PHONE_NOTIFICATION_STATUS_IDLE
         obj.phone_notification_error = PHONE_NOTIFICATION_ERROR_NONE
         obj.created_at = time.time()
@@ -708,7 +711,10 @@ class WebTerminalServer:
         self._sse_clients: list = []
         self._sse_lock = threading.Lock()
         self._settings_lock = threading.Lock()
-        self._settings = {SETTINGS_NTFY_URL_KEY: DEFAULT_NTFY_URL}
+        self._settings = {
+            SETTINGS_NTFY_URL_KEY: DEFAULT_NTFY_URL,
+            SETTINGS_SESSION_NOTIFICATIONS_KEY: {},
+        }
         self._load_settings()
 
     def is_running(self) -> bool:
@@ -718,10 +724,19 @@ class WebTerminalServer:
         try:
             payload = json.loads(self.settings_path.read_text(encoding="utf-8"))
             ntfy_url = normalize_ntfy_url(payload.get(SETTINGS_NTFY_URL_KEY, DEFAULT_NTFY_URL))
+            raw_session_notifications = payload.get(SETTINGS_SESSION_NOTIFICATIONS_KEY, {})
+            session_notifications = {}
+            if isinstance(raw_session_notifications, dict):
+                session_notifications = {
+                    session_id: enabled
+                    for session_id, enabled in raw_session_notifications.items()
+                    if isinstance(session_id, str) and isinstance(enabled, bool)
+                }
         except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError):
             return
         with self._settings_lock:
             self._settings[SETTINGS_NTFY_URL_KEY] = ntfy_url
+            self._settings[SETTINGS_SESSION_NOTIFICATIONS_KEY] = session_notifications
 
     def _save_settings(self) -> None:
         with self._settings_lock:
@@ -731,7 +746,11 @@ class WebTerminalServer:
 
     def settings_info(self) -> Dict[str, object]:
         with self._settings_lock:
-            return dict(self._settings)
+            payload = dict(self._settings)
+            payload[SETTINGS_SESSION_NOTIFICATIONS_KEY] = dict(
+                self._settings.get(SETTINGS_SESSION_NOTIFICATIONS_KEY, {})
+            )
+            return payload
 
     def update_settings(self, ntfy_url: object) -> Dict[str, object]:
         normalized_url = normalize_ntfy_url(ntfy_url)
@@ -739,6 +758,25 @@ class WebTerminalServer:
             self._settings[SETTINGS_NTFY_URL_KEY] = normalized_url
         self._save_settings()
         return self.settings_info()
+
+    def _session_phone_notifications_enabled(self, session_id: str) -> bool:
+        with self._settings_lock:
+            session_notifications = self._settings.get(SETTINGS_SESSION_NOTIFICATIONS_KEY, {})
+            if not isinstance(session_notifications, dict):
+                return False
+            return session_notifications.get(session_id, False) is True
+
+    def _set_session_phone_notifications_enabled(self, session_id: str, enabled: bool) -> None:
+        with self._settings_lock:
+            session_notifications = dict(
+                self._settings.get(SETTINGS_SESSION_NOTIFICATIONS_KEY, {})
+            )
+            if enabled:
+                session_notifications[session_id] = True
+            else:
+                session_notifications.pop(session_id, None)
+            self._settings[SETTINGS_SESSION_NOTIFICATIONS_KEY] = session_notifications
+        self._save_settings()
 
     def _cleanup_orphan_pipes(self) -> None:
         """Remove /tmp/termweb-*.pipe files whose owning server process is gone."""
@@ -790,6 +828,7 @@ class WebTerminalServer:
                     session_id=session_id,
                     shell=self.shell,
                     cwd=self.cwd,
+                    phone_notifications_enabled=self._session_phone_notifications_enabled(session_id),
                 )
                 self._sessions[session_id] = session
             except Exception:
@@ -814,6 +853,9 @@ class WebTerminalServer:
     def shutdown(self) -> None:
         if self._httpd is not None:
             self._httpd.shutdown()
+            deadline = time.monotonic() + SERVER_SHUTDOWN_TIMEOUT
+            while self._running and time.monotonic() < deadline:
+                time.sleep(0.01)
 
     def _next_port(self) -> int:
         """Find the next available port starting from SESSION_PORT_BASE."""
@@ -890,6 +932,7 @@ class WebTerminalServer:
         session = self._get_session(session_id)
         with session._lock:
             session.phone_notifications_enabled = enabled
+        self._set_session_phone_notifications_enabled(session_id, enabled)
         return session.info()
 
     def resize_session(self, session_id: str, cols: int, rows: int) -> Dict[str, int]:

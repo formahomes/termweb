@@ -931,6 +931,7 @@
         await sendJson("/api/sessions/" + sessionId + "/resize", "POST", { cols, rows });
 
         ws = openWebSocket(sessionId);
+        if (terminal) terminal.focus();
       }
 
       // --- New session form ---

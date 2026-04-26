@@ -579,6 +579,7 @@ def test_dashboard_page_served(terminal_server):
     assert "session-card__notify-error" in body
     assert 'PHONE_NOTIFICATION_STATUS_FAILED = "failed"' in body
     assert "session.phone_notification_status === PHONE_NOTIFICATION_STATUS_FAILED" in body
+    assert "terminal.focus();" in body
     assert "/api/settings" in body
 
 
@@ -643,6 +644,66 @@ def test_session_phone_notifications_can_be_toggled(terminal_server):
         payload={"enabled": False},
     )
     assert payload["phone_notifications_enabled"] is False
+
+
+def test_session_phone_notification_setting_survives_server_restart(tmp_path):
+    """Session phone notification settings are restored with recovered sessions."""
+    settings_path = tmp_path / "settings.json"
+    port = get_free_port()
+    server = WebTerminalServer(
+        host=DEFAULT_HOST,
+        port=port,
+        shell="/bin/sh",
+        settings_path=settings_path,
+    )
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
+    deadline = time.time() + OUTPUT_TIMEOUT_SECONDS
+    while time.time() < deadline:
+        if server.is_running():
+            break
+        time.sleep(POLL_INTERVAL_SECONDS)
+
+    base_url = f"http://{server.host}:{port}"
+    _, session_payload = http_request(f"{base_url}/api/sessions", method="POST")
+    session_id = session_payload["session_id"]
+    http_request(
+        f"{base_url}/api/sessions/{session_id}/notifications",
+        method="POST",
+        payload={"enabled": True},
+    )
+    server.shutdown()
+    server_thread.join(timeout=OUTPUT_TIMEOUT_SECONDS)
+
+    port2 = get_free_port()
+    server2 = WebTerminalServer(
+        host=DEFAULT_HOST,
+        port=port2,
+        shell="/bin/sh",
+        settings_path=settings_path,
+    )
+    server2_thread = threading.Thread(target=server2.serve_forever, daemon=True)
+    server2_thread.start()
+
+    deadline = time.time() + OUTPUT_TIMEOUT_SECONDS
+    while time.time() < deadline:
+        if server2.is_running():
+            break
+        time.sleep(POLL_INTERVAL_SECONDS)
+
+    try:
+        base_url2 = f"http://{server2.host}:{port2}"
+        _, sessions = http_request(f"{base_url2}/api/sessions")
+        match = [s for s in sessions["sessions"] if s["session_id"] == session_id]
+        assert match[0]["phone_notifications_enabled"] is True
+    finally:
+        try:
+            server2.close_session(session_id)
+        except KeyError:
+            pass
+        server2.shutdown()
+        server2_thread.join(timeout=OUTPUT_TIMEOUT_SECONDS)
 
 
 def test_notify_posts_to_ntfy_only_for_enabled_sessions(terminal_server):

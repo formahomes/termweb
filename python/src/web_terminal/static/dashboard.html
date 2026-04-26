@@ -67,6 +67,12 @@
         text-transform: uppercase;
       }
 
+      .sidebar__actions {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+      }
+
       .btn {
         border: 1px solid var(--border);
         background: rgba(17, 24, 45, 0.92);
@@ -141,6 +147,21 @@
       }
 
       .session-card__port a:hover { text-decoration: underline; }
+
+      .session-card__notify {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        color: var(--muted);
+        cursor: pointer;
+        user-select: none;
+      }
+
+      .session-card__notify input {
+        width: 12px;
+        height: 12px;
+        accent-color: #7b9dff;
+      }
 
       .session-card__status {
         display: inline-block;
@@ -253,7 +274,8 @@
       }
 
       /* New session form */
-      .new-session-form {
+      .new-session-form,
+      .settings-menu {
         display: none;
         flex-direction: column;
         gap: 6px;
@@ -265,15 +287,18 @@
       }
 
       .new-session-form.is-visible { display: flex; }
+      .settings-menu.is-visible { display: flex; }
 
-      .new-session-form label {
+      .new-session-form label,
+      .settings-menu label {
         font-size: 10px;
         color: var(--muted);
         text-transform: uppercase;
         letter-spacing: 0.05em;
       }
 
-      .new-session-form input {
+      .new-session-form input,
+      .settings-menu input {
         border: 1px solid var(--border);
         background: rgba(10, 15, 30, 0.94);
         color: var(--text);
@@ -284,6 +309,12 @@
       }
 
       .new-session-form__actions {
+        display: flex;
+        gap: 6px;
+        margin-top: 4px;
+      }
+
+      .settings-menu__actions {
         display: flex;
         gap: 6px;
         margin-top: 4px;
@@ -383,7 +414,17 @@
       <aside class="sidebar">
         <div class="sidebar__header">
           <span class="sidebar__title">Sessions</span>
-          <button class="btn" id="toggle-new-form" type="button">+ New</button>
+          <div class="sidebar__actions">
+            <button class="btn" id="toggle-settings-menu" type="button" title="Settings">&#9881;</button>
+            <button class="btn" id="toggle-new-form" type="button">+ New</button>
+          </div>
+        </div>
+        <div class="settings-menu" id="settings-menu">
+          <label for="settings-ntfy-url">ntfy.sh URL</label>
+          <input id="settings-ntfy-url" type="url" placeholder="https://ntfy.sh/topic" />
+          <div class="settings-menu__actions">
+            <button class="btn" id="settings-save" type="button">Save</button>
+          </div>
         </div>
         <div class="new-session-form" id="new-session-form">
           <label>Label (optional)</label>
@@ -432,6 +473,10 @@
       const terminalContainerNode = document.getElementById("terminal-container");
       const terminalNode = document.getElementById("session-terminal");
       const toggleFormNode = document.getElementById("toggle-new-form");
+      const toggleSettingsNode = document.getElementById("toggle-settings-menu");
+      const settingsMenuNode = document.getElementById("settings-menu");
+      const settingsNtfyUrlNode = document.getElementById("settings-ntfy-url");
+      const settingsSaveNode = document.getElementById("settings-save");
       const formNode = document.getElementById("new-session-form");
       const formLabelNode = document.getElementById("form-label");
       const formRepoNode = document.getElementById("form-repo");
@@ -446,6 +491,7 @@
       const keyButtons = Array.from(document.querySelectorAll("[data-key]"));
 
       let sessions = [];
+      let settings = { ntfy_url: "" };
       let activeSessionId = null;
       let ws = null;
       let terminal = null;
@@ -542,6 +588,31 @@
         setTimeout(function() { repoSuggestionsNode.hidden = true; }, 200);
       });
 
+      // --- Settings ---
+
+      async function loadSettings() {
+        settings = await sendJson("/api/settings", "GET");
+        settingsNtfyUrlNode.value = settings.ntfy_url || "";
+      }
+
+      async function saveSettings() {
+        settings = await sendJson("/api/settings", "POST", {
+          ntfy_url: settingsNtfyUrlNode.value.trim()
+        });
+        settingsNtfyUrlNode.value = settings.ntfy_url || "";
+      }
+
+      toggleSettingsNode.addEventListener("click", function() {
+        settingsMenuNode.classList.toggle("is-visible");
+        if (settingsMenuNode.classList.contains("is-visible")) {
+          loadSettings().catch(console.error);
+        }
+      });
+
+      settingsSaveNode.addEventListener("click", function() {
+        saveSettings().catch(console.error);
+      });
+
       // --- Session list rendering ---
 
       function renderSessionList() {
@@ -621,6 +692,32 @@
             const branchSpan = document.createElement("span");
             branchSpan.textContent = session.worktree_path.split("/").pop();
             meta.appendChild(branchSpan);
+          }
+          if (!session.closed) {
+            const notifyLabel = document.createElement("label");
+            notifyLabel.className = "session-card__notify";
+            notifyLabel.addEventListener("click", function(event) {
+              event.stopPropagation();
+            });
+            const notifyInput = document.createElement("input");
+            notifyInput.type = "checkbox";
+            notifyInput.checked = !!session.phone_notifications_enabled;
+            notifyInput.addEventListener("change", function(event) {
+              event.stopPropagation();
+              sendJson(
+                "/api/sessions/" + session.session_id + "/notifications",
+                "POST",
+                { enabled: notifyInput.checked }
+              ).then(function() {
+                refreshSessions();
+              }).catch(function(error) {
+                notifyInput.checked = !notifyInput.checked;
+                console.error(error);
+              });
+            });
+            notifyLabel.appendChild(notifyInput);
+            notifyLabel.appendChild(document.createTextNode(" Phone"));
+            meta.appendChild(notifyLabel);
           }
 
           card.appendChild(labelRow);
@@ -939,7 +1036,7 @@
       var eventSource = new EventSource("/api/events");
       eventSource.onmessage = function(event) {
         var data = JSON.parse(event.data);
-        if (data.event === "done") {
+        if (data.event === "done" && data.session_id === activeSessionId) {
           notifySound.currentTime = 0;
           notifySound.play().catch(function(e) { console.warn("audio play failed:", e); });
         }
@@ -948,6 +1045,7 @@
 
       // --- Initialize ---
 
+      loadSettings().catch(console.error);
       refreshSessions().catch(console.error);
     </script>
   </body>

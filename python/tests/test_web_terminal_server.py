@@ -14,6 +14,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
@@ -55,13 +56,14 @@ def http_request(url, method="GET", payload=None):
 
 
 @pytest.fixture
-def terminal_server():
+def terminal_server(tmp_path):
     """Start a web terminal server on a free port for integration testing."""
     port = get_free_port()
     server = WebTerminalServer(
         host=DEFAULT_HOST,
         port=port,
         shell="/bin/sh",
+        settings_path=tmp_path / "settings.json",
     )
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
@@ -88,6 +90,36 @@ def terminal_server():
     server.detach_all_sessions()
     server.shutdown()
     server_thread.join(timeout=OUTPUT_TIMEOUT_SECONDS)
+
+
+class NtfyRecorderHandler(BaseHTTPRequestHandler):
+    """Record ntfy publish requests received by the test HTTP server."""
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length).decode("utf-8")
+        self.server.requests.append({
+            "path": self.path,
+            "body": body,
+            "headers": dict(self.headers),
+        })
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"ok":true}')
+
+    def log_message(self, format, *args):
+        return
+
+
+def start_ntfy_recorder():
+    """Start a local HTTP server that records ntfy publish requests."""
+    server = ThreadingHTTPServer((DEFAULT_HOST, 0), NtfyRecorderHandler)
+    server.requests = []
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    url = f"http://{DEFAULT_HOST}:{server.server_port}/termweb-topic"
+    return server, thread, url
 
 
 def read_until(url, session_id, expected_text, cursor=0):
@@ -541,6 +573,132 @@ def test_dashboard_page_served(terminal_server):
     assert "session-list" in body
     assert "session-terminal" in body
     assert "xterm" in body.lower()
+    assert 'id="settings-menu"' in body
+    assert 'id="settings-ntfy-url"' in body
+    assert "session-card__notify" in body
+    assert "/api/settings" in body
+
+
+def test_dashboard_audio_only_plays_for_active_done_session(terminal_server):
+    """Dashboard audio only plays when the active session reports done."""
+    server, port = terminal_server
+    status, body = http_request(f"http://{server.host}:{port}/dashboard")
+
+    assert status == 200
+    assert 'data.event === "done" && data.session_id === activeSessionId' in body
+
+
+def test_notification_settings_url_can_be_saved(terminal_server):
+    """GET/POST /api/settings reads and stores the ntfy publish URL."""
+    server, port = terminal_server
+    base_url = f"http://{server.host}:{port}"
+
+    _, settings = http_request(f"{base_url}/api/settings")
+    assert settings["ntfy_url"] == ""
+
+    status, payload = http_request(
+        f"{base_url}/api/settings",
+        method="POST",
+        payload={"ntfy_url": "ntfy.sh/termweb-topic"},
+    )
+
+    assert status == 200
+    assert payload["ntfy_url"] == "https://ntfy.sh/termweb-topic"
+
+    _, settings = http_request(f"{base_url}/api/settings")
+    assert settings["ntfy_url"] == "https://ntfy.sh/termweb-topic"
+
+
+def test_session_phone_notifications_can_be_toggled(terminal_server):
+    """POST /api/sessions/{id}/notifications changes the session phone notification flag."""
+    server, port = terminal_server
+    base_url = f"http://{server.host}:{port}"
+
+    _, session_payload = http_request(f"{base_url}/api/sessions", method="POST")
+    session_id = session_payload["session_id"]
+
+    _, sessions = http_request(f"{base_url}/api/sessions")
+    match = [s for s in sessions["sessions"] if s["session_id"] == session_id]
+    assert match[0]["phone_notifications_enabled"] is False
+
+    status, payload = http_request(
+        f"{base_url}/api/sessions/{session_id}/notifications",
+        method="POST",
+        payload={"enabled": True},
+    )
+
+    assert status == 200
+    assert payload["phone_notifications_enabled"] is True
+
+    _, sessions = http_request(f"{base_url}/api/sessions")
+    match = [s for s in sessions["sessions"] if s["session_id"] == session_id]
+    assert match[0]["phone_notifications_enabled"] is True
+
+    _, payload = http_request(
+        f"{base_url}/api/sessions/{session_id}/notifications",
+        method="POST",
+        payload={"enabled": False},
+    )
+    assert payload["phone_notifications_enabled"] is False
+
+
+def test_notify_posts_to_ntfy_only_for_enabled_sessions(terminal_server):
+    """POST /notify publishes to ntfy only when the session has phone notifications enabled."""
+    server, port = terminal_server
+    base_url = f"http://{server.host}:{port}"
+    ntfy_server, ntfy_thread, ntfy_url = start_ntfy_recorder()
+
+    try:
+        http_request(
+            f"{base_url}/api/settings",
+            method="POST",
+            payload={"ntfy_url": ntfy_url},
+        )
+        _, session_payload = http_request(f"{base_url}/api/sessions", method="POST")
+        session_id = session_payload["session_id"]
+        label = session_payload["label"]
+
+        http_request(
+            f"{base_url}/api/sessions/{session_id}/notify",
+            method="POST",
+            payload={"event": "done"},
+        )
+        time.sleep(0.2)
+        assert ntfy_server.requests == []
+
+        http_request(
+            f"{base_url}/api/sessions/{session_id}/notifications",
+            method="POST",
+            payload={"enabled": True},
+        )
+        http_request(
+            f"{base_url}/api/sessions/{session_id}/notify",
+            method="POST",
+            payload={"event": "processing"},
+        )
+        time.sleep(0.2)
+        assert ntfy_server.requests == []
+
+        http_request(
+            f"{base_url}/api/sessions/{session_id}/notify",
+            method="POST",
+            payload={"event": "done"},
+        )
+        deadline = time.time() + OUTPUT_TIMEOUT_SECONDS
+        while time.time() < deadline and not ntfy_server.requests:
+            time.sleep(POLL_INTERVAL_SECONDS)
+
+        assert len(ntfy_server.requests) == 1
+        request = ntfy_server.requests[0]
+        assert request["path"] == "/termweb-topic"
+        assert request["body"] == f'Session "{label}" is done.'
+        assert request["headers"]["Title"] == "Termweb"
+        assert request["headers"]["Tags"] == "termweb"
+        assert request["headers"]["Cache"] == "no"
+    finally:
+        ntfy_server.shutdown()
+        ntfy_server.server_close()
+        ntfy_thread.join(timeout=OUTPUT_TIMEOUT_SECONDS)
 
 
 def test_notify_sets_session_status(terminal_server):

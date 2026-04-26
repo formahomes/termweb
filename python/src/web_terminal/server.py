@@ -19,6 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Dict, Optional
 from urllib.parse import parse_qs, urlparse
+from urllib.request import Request, urlopen
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
@@ -31,6 +32,16 @@ INPUT_BATCH_DELAY = 0.01
 DEFAULT_TAIL_LINES = 2000
 SESSION_PORT_BASE = 4000
 TMUX_SESSION_PREFIX = "termweb-"
+DEFAULT_SETTINGS_PATH = Path.home() / ".termweb-runtime" / "settings.json"
+SETTINGS_NTFY_URL_KEY = "ntfy_url"
+DEFAULT_NTFY_URL = ""
+NTFY_TITLE = "Termweb"
+NTFY_TAGS = "termweb"
+NTFY_CACHE = "no"
+NTFY_CONTENT_TYPE = "text/plain; charset=utf-8"
+NTFY_DONE_EVENT = "done"
+NTFY_TIMEOUT_SECONDS = 2.0
+NTFY_DONE_MESSAGE = 'Session "{label}" is done.'
 TMUX_BIN = (
     shutil.which("tmux")
     or shutil.which("tmux", path="/opt/homebrew/bin:/usr/local/bin:/usr/bin")
@@ -68,6 +79,21 @@ def list_directories(prefix: str) -> Dict[str, list]:
     return {"paths": entries[:50]}
 
 
+def normalize_ntfy_url(value: object) -> str:
+    """Return a validated ntfy publish URL, or an empty string when disabled."""
+    if not isinstance(value, str):
+        raise ValueError("ntfy URL must be a string")
+    ntfy_url = value.strip()
+    if not ntfy_url:
+        return DEFAULT_NTFY_URL
+    if "://" not in ntfy_url:
+        ntfy_url = "https://" + ntfy_url
+    parsed = urlparse(ntfy_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.path in {"", "/"}:
+        raise ValueError("ntfy URL must include an http(s) host and topic")
+    return ntfy_url.rstrip("/")
+
+
 
 class TerminalSession:
     """A single tmux-backed shell session using pipe-pane for output and send-keys for input."""
@@ -85,7 +111,8 @@ class TerminalSession:
                  session_id: Optional[str] = None, label: Optional[str] = None,
                  port: Optional[int] = None, repo_path: Optional[str] = None,
                  worktree_path: Optional[str] = None,
-                 server_url: Optional[str] = None):
+                 server_url: Optional[str] = None,
+                 phone_notifications_enabled: bool = False):
         self.shell = shell
         self.cwd = cwd
         self.cols = cols
@@ -96,6 +123,7 @@ class TerminalSession:
         self.repo_path = repo_path
         self.worktree_path = worktree_path
         self.server_url = server_url
+        self.phone_notifications_enabled = phone_notifications_enabled
         self.created_at = time.time()
         self.status = "idle"
         self._buffer = ""
@@ -122,6 +150,8 @@ class TerminalSession:
         obj.port = None
         obj.repo_path = None
         obj.worktree_path = None
+        obj.server_url = None
+        obj.phone_notifications_enabled = False
         obj.created_at = time.time()
         obj.status = "idle"
         obj._closed = False
@@ -345,6 +375,7 @@ class TerminalSession:
             "worktree_path": self.worktree_path,
             "created_at": self.created_at,
             "status": self.status,
+            "phone_notifications_enabled": self.phone_notifications_enabled,
             "closed": closed,
         }
 
@@ -649,21 +680,52 @@ class WebTerminalServer:
         shell: Optional[str] = None,
         cwd: Optional[str] = None,
         static_dir: Optional[Path] = None,
+        settings_path: Optional[Path] = None,
     ):
         self.host = host
         self.port = port
         self.shell = shell or os.environ.get("SHELL") or "/bin/sh"
         self.cwd = cwd or str(Path.home())
         self.static_dir = Path(static_dir) if static_dir else DEFAULT_STATIC_DIR
+        self.settings_path = Path(settings_path) if settings_path else DEFAULT_SETTINGS_PATH
         self._httpd: Optional[ThreadingHTTPServer] = None
         self._running = False
         self._sessions: Dict[str, TerminalSession] = {}
         self._sessions_lock = threading.Lock()
         self._sse_clients: list = []
         self._sse_lock = threading.Lock()
+        self._settings_lock = threading.Lock()
+        self._settings = {SETTINGS_NTFY_URL_KEY: DEFAULT_NTFY_URL}
+        self._load_settings()
 
     def is_running(self) -> bool:
         return self._running
+
+    def _load_settings(self) -> None:
+        try:
+            payload = json.loads(self.settings_path.read_text(encoding="utf-8"))
+            ntfy_url = normalize_ntfy_url(payload.get(SETTINGS_NTFY_URL_KEY, DEFAULT_NTFY_URL))
+        except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError):
+            return
+        with self._settings_lock:
+            self._settings[SETTINGS_NTFY_URL_KEY] = ntfy_url
+
+    def _save_settings(self) -> None:
+        with self._settings_lock:
+            payload = dict(self._settings)
+        self.settings_path.parent.mkdir(parents=True, exist_ok=True)
+        self.settings_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+    def settings_info(self) -> Dict[str, object]:
+        with self._settings_lock:
+            return dict(self._settings)
+
+    def update_settings(self, ntfy_url: object) -> Dict[str, object]:
+        normalized_url = normalize_ntfy_url(ntfy_url)
+        with self._settings_lock:
+            self._settings[SETTINGS_NTFY_URL_KEY] = normalized_url
+        self._save_settings()
+        return self.settings_info()
 
     def _cleanup_orphan_pipes(self) -> None:
         """Remove /tmp/termweb-*.pipe files whose owning server process is gone."""
@@ -809,6 +871,14 @@ class WebTerminalServer:
             session.label = label
         return session.info()
 
+    def set_phone_notifications(self, session_id: str, enabled: object) -> Dict[str, object]:
+        if not isinstance(enabled, bool):
+            raise ValueError("enabled must be a boolean")
+        session = self._get_session(session_id)
+        with session._lock:
+            session.phone_notifications_enabled = enabled
+        return session.info()
+
     def resize_session(self, session_id: str, cols: int, rows: int) -> Dict[str, int]:
         return self._get_session(session_id).resize(cols=cols, rows=rows)
 
@@ -852,8 +922,35 @@ class WebTerminalServer:
         session = self._get_session(session_id)
         with session._lock:
             session.status = event
+            phone_notifications_enabled = session.phone_notifications_enabled
+            label = session.label
         self._broadcast_sse({"session_id": session_id, "event": event})
+        if event == NTFY_DONE_EVENT and phone_notifications_enabled:
+            self._publish_ntfy_done(label)
         return {"ok": True}
+
+    def _publish_ntfy_done(self, label: str) -> None:
+        with self._settings_lock:
+            ntfy_url = self._settings.get(SETTINGS_NTFY_URL_KEY, DEFAULT_NTFY_URL)
+        if not ntfy_url:
+            return
+        message = NTFY_DONE_MESSAGE.format(label=label)
+        request = Request(
+            ntfy_url,
+            data=message.encode("utf-8"),
+            headers={
+                "Title": NTFY_TITLE,
+                "Tags": NTFY_TAGS,
+                "Cache": NTFY_CACHE,
+                "Content-Type": NTFY_CONTENT_TYPE,
+            },
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=NTFY_TIMEOUT_SECONDS) as response:
+                response.read()
+        except OSError:
+            return
 
     def _broadcast_sse(self, data: dict) -> None:
         """Send an event to all connected SSE clients."""
@@ -943,6 +1040,9 @@ class TerminalRequestHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/sessions":
             self._send_json(self.service.list_sessions())
             return
+        if parsed.path == "/api/settings":
+            self._send_json(self.service.settings_info())
+            return
         if parsed.path == "/api/paths":
             query = parse_qs(parsed.query)
             prefix = query.get("prefix", [""])[0]
@@ -996,6 +1096,17 @@ class TerminalRequestHandler(BaseHTTPRequestHandler):
             )
             self._send_json(payload, status=HTTPStatus.CREATED)
             return
+        if parsed.path == "/api/settings":
+            payload = self._read_json()
+            try:
+                response = self.service.update_settings(
+                    payload.get(SETTINGS_NTFY_URL_KEY, DEFAULT_NTFY_URL)
+                )
+            except ValueError as exc:
+                self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
+                return
+            self._send_json(response)
+            return
         if parsed.path.startswith("/api/sessions/") and parsed.path.endswith("/input"):
             session_id = parsed.path.split("/")[3]
             payload = self._read_json()
@@ -1026,6 +1137,19 @@ class TerminalRequestHandler(BaseHTTPRequestHandler):
             label = payload.get("label", "")
             try:
                 response = self.service.rename_session(session_id, label)
+            except KeyError:
+                self._send_error(HTTPStatus.NOT_FOUND, "Session not found")
+                return
+            except ValueError as exc:
+                self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
+                return
+            self._send_json(response)
+            return
+        if parsed.path.startswith("/api/sessions/") and parsed.path.endswith("/notifications"):
+            session_id = parsed.path.split("/")[3]
+            payload = self._read_json()
+            try:
+                response = self.service.set_phone_notifications(session_id, payload.get("enabled"))
             except KeyError:
                 self._send_error(HTTPStatus.NOT_FOUND, "Session not found")
                 return

@@ -10,6 +10,7 @@ import queue
 import select
 import shutil
 import socket
+import ssl
 import subprocess
 import threading
 import time
@@ -51,6 +52,10 @@ PHONE_NOTIFICATION_STATUS_SENT = "sent"
 PHONE_NOTIFICATION_STATUS_FAILED = "failed"
 PHONE_NOTIFICATION_ERROR_NONE = ""
 PHONE_NOTIFICATION_MISSING_URL_ERROR = "ntfy URL is not configured"
+HTTPS_CA_BUNDLE_CANDIDATES = (
+    Path("/etc/ssl/cert.pem"),
+    Path("/opt/homebrew/etc/ca-certificates/cert.pem"),
+)
 TMUX_BIN = (
     shutil.which("tmux")
     or shutil.which("tmux", path="/opt/homebrew/bin:/usr/local/bin:/usr/bin")
@@ -101,6 +106,28 @@ def normalize_ntfy_url(value: object) -> str:
     if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.path in {"", "/"}:
         raise ValueError("ntfy URL must include an http(s) host and topic")
     return ntfy_url.rstrip("/")
+
+
+def _ca_bundle_candidates() -> list:
+    candidates = []
+    try:
+        import certifi
+        candidates.append(Path(certifi.where()))
+    except ImportError:
+        pass
+    default_paths = ssl.get_default_verify_paths()
+    if default_paths.cafile:
+        candidates.append(Path(default_paths.cafile))
+    candidates.extend(HTTPS_CA_BUNDLE_CANDIDATES)
+    return candidates
+
+
+def create_https_context() -> ssl.SSLContext:
+    """Return an HTTPS context backed by an available CA certificate bundle."""
+    for ca_file in _ca_bundle_candidates():
+        if ca_file.is_file():
+            return ssl.create_default_context(cafile=str(ca_file))
+    return ssl.create_default_context()
 
 
 
@@ -1013,8 +1040,9 @@ class WebTerminalServer:
             },
             method="POST",
         )
+        context = create_https_context() if urlparse(ntfy_url).scheme == "https" else None
         try:
-            with urlopen(request, timeout=NTFY_TIMEOUT_SECONDS) as response:
+            with urlopen(request, timeout=NTFY_TIMEOUT_SECONDS, context=context) as response:
                 response.read()
         except HTTPError as exc:
             return {

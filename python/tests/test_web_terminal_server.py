@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import socket
+import ssl
 import struct
 import subprocess
 import sys
@@ -20,7 +21,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from web_terminal.server import DEFAULT_HOST, TMUX_SESSION_PREFIX, WS_MAGIC, WebTerminalServer
+from web_terminal.server import DEFAULT_HOST, TMUX_SESSION_PREFIX, WS_MAGIC, WebTerminalServer, create_https_context
 
 OUTPUT_TIMEOUT_SECONDS = 5.0
 POLL_INTERVAL_SECONDS = 0.05
@@ -120,6 +121,15 @@ def start_ntfy_recorder():
     thread.start()
     url = f"http://{DEFAULT_HOST}:{server.server_port}/termweb-topic"
     return server, thread, url
+
+
+def test_https_context_verifies_certificates():
+    """HTTPS publishing uses a CA-backed verifying SSL context."""
+    context = create_https_context()
+
+    assert context.verify_mode == ssl.CERT_REQUIRED
+    assert context.check_hostname is True
+    assert context.get_ca_certs()
 
 
 def read_until(url, session_id, expected_text, cursor=0):

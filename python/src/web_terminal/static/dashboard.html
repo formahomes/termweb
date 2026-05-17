@@ -1052,7 +1052,7 @@
       var eventSource = new EventSource("/api/events");
       eventSource.onmessage = function(event) {
         var data = JSON.parse(event.data);
-        if (data.event === "done" && data.session_id === activeSessionId) {
+        if (data.event === "done") {
           notifySound.currentTime = 0;
           notifySound.play().catch(function(e) { console.warn("audio play failed:", e); });
         }

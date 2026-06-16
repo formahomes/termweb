@@ -1353,6 +1353,10 @@ class TerminalRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Connection", "keep-alive")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
+        # Send a comment immediately so browser EventSource clients establish the
+        # stream right away instead of waiting for the first event or keepalive.
+        self.wfile.write(b": connected\n\n")
+        self.wfile.flush()
         q = self.service.register_sse_client()
         try:
             while True:

@@ -939,6 +939,26 @@ def test_sse_streams_notify_events(terminal_server):
     assert session_id in last_event
 
 
+def test_sse_sends_initial_primer(terminal_server):
+    """GET /api/events sends an immediate comment line so browser EventSource
+    clients establish the connection before any session event arrives."""
+    server, port = terminal_server
+    base_url = f"http://{server.host}:{port}"
+
+    request = urllib.request.Request(f"{base_url}/api/events")
+    request.add_header("Accept", "text/event-stream")
+    with urllib.request.urlopen(request, timeout=2.0) as response:
+        primer = b""
+        while b"\n\n" not in primer:
+            chunk = response.read(1)
+            if not chunk:
+                break
+            primer += chunk
+
+    assert primer.startswith(b":")
+    assert primer.endswith(b"\n\n")
+
+
 def test_sessions_survive_server_restart(terminal_server):
     """Sessions created by one server are recoverable by a new server."""
     server, port = terminal_server

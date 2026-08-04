@@ -40,6 +40,17 @@ DEFAULT_TAIL_LINES = 2000
 MAX_BUFFER_CHARS = 4 * 1024 * 1024
 BUFFER_TRIM_SLACK_CHARS = 1024 * 1024
 SESSION_PORT_BASE = 4000
+# A full-screen program switches these modes on once at startup. Clients that
+# connect later only ever receive rendered pane content, so the modes have to be
+# restored explicitly or the browser stays on the normal screen with mouse
+# reporting off and the program never sees a wheel event.
+MODE_RESTORE_SEQUENCES = (
+    ("alternate_on", "\x1b[?1049h"),
+    ("mouse_standard_flag", "\x1b[?1000h"),
+    ("mouse_button_flag", "\x1b[?1002h"),
+    ("mouse_any_flag", "\x1b[?1003h"),
+    ("mouse_sgr_flag", "\x1b[?1006h"),
+)
 TMUX_SESSION_PREFIX = "termweb-"
 DEFAULT_SETTINGS_PATH = Path.home() / ".termweb-runtime" / "settings.json"
 SETTINGS_NTFY_URL_KEY = "ntfy_url"
@@ -415,6 +426,24 @@ class TerminalSession:
             capture_output=True,
         )
 
+    def mode_preamble(self) -> str:
+        """Return escape sequences that put a client into the pane's current modes."""
+        query = " ".join("#{" + flag + "}" for flag, _ in MODE_RESTORE_SEQUENCES)
+        result = subprocess.run(
+            [TMUX_BIN, "display-message", "-t", self._tmux_name, "-p", query],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            return ""
+        flags = result.stdout.split()
+        if len(flags) != len(MODE_RESTORE_SEQUENCES):
+            return ""
+        return "".join(
+            sequence
+            for flag, (_, sequence) in zip(flags, MODE_RESTORE_SEQUENCES)
+            if flag == "1"
+        )
+
     def _current_pane_path(self) -> str:
         """Query tmux for the current working directory of the pane."""
         result = subprocess.run(
@@ -634,6 +663,12 @@ def ws_relay(sock, reader, session: "TerminalSession", cursor_hint: Optional[int
                 return False
 
     if not send(WS_OP_BINARY, bytes([WS_BIN_META]) + json.dumps({"cursor": cursor}).encode("utf-8")):
+        return
+
+    # Restore the pane's modes before replaying content, so the replayed frame
+    # lands on the screen the program is actually drawing to.
+    preamble = session.mode_preamble()
+    if preamble and not send(WS_OP_BINARY, bytes([WS_BIN_OOB]) + preamble.encode("utf-8")):
         return
 
     def on_oob(seq: str) -> None:

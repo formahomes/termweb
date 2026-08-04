@@ -26,6 +26,7 @@ from web_terminal.server import (
     DEFAULT_HOST,
     MAX_BUFFER_CHARS,
     TMUX_SESSION_PREFIX,
+    WS_BIN_OOB,
     WS_MAGIC,
     WebTerminalServer,
     create_https_context,
@@ -444,6 +445,106 @@ def test_websocket_streams_terminal_io(terminal_server):
         assert "__WS_OK__" in collected
     finally:
         sock.close()
+
+
+def ws_recv_frames(sock, timeout=OUTPUT_TIMEOUT_SECONDS):
+    """Read WebSocket frames until timeout, returning a list of (opcode, payload)."""
+    sock.settimeout(timeout)
+    frames = []
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            header = sock.recv(2)
+        except socket.timeout:
+            break
+        if len(header) < 2:
+            break
+        opcode = header[0] & 0x0F
+        length = header[1] & 0x7F
+        if length == 126:
+            length = struct.unpack("!H", sock.recv(2))[0]
+        elif length == 127:
+            length = struct.unpack("!Q", sock.recv(8))[0]
+        payload = b""
+        while len(payload) < length:
+            chunk = sock.recv(length - len(payload))
+            if not chunk:
+                break
+            payload += chunk
+        frames.append((opcode, payload))
+        if opcode == 0x8:
+            break
+    return frames
+
+
+def start_full_screen_mouse_program(base_url, session_id, tmux_name):
+    """Switch the pane to the alternate screen with mouse reporting, as a TUI does."""
+    http_request(
+        f"{base_url}/api/sessions/{session_id}/input",
+        method="POST",
+        payload={"data": "printf '\\033[?1049h\\033[?1003h\\033[?1006h'\n"},
+    )
+    deadline = time.time() + OUTPUT_TIMEOUT_SECONDS
+    while time.time() < deadline:
+        result = subprocess.run(
+            ["tmux", "display-message", "-t", tmux_name, "-p",
+             "#{alternate_on}#{mouse_any_flag}#{mouse_sgr_flag}"],
+            capture_output=True, text=True,
+        )
+        if result.stdout.strip() == "111":
+            return
+        time.sleep(POLL_INTERVAL_SECONDS)
+    raise AssertionError("pane never entered the alternate screen with mouse reporting")
+
+
+def test_mode_preamble_reports_alternate_screen_and_mouse(terminal_server):
+    """The preamble carries the modes the pane's program switched on."""
+    server, port = terminal_server
+    base_url = f"http://{server.host}:{port}"
+
+    _, session_payload = http_request(f"{base_url}/api/sessions", method="POST")
+    session_id = session_payload["session_id"]
+    session = server._get_session(session_id)
+    start_full_screen_mouse_program(base_url, session_id, TMUX_SESSION_PREFIX + session_id)
+
+    preamble = session.mode_preamble()
+
+    assert "\x1b[?1049h" in preamble
+    assert "\x1b[?1003h" in preamble
+    assert "\x1b[?1006h" in preamble
+
+
+def test_mode_preamble_is_empty_for_a_plain_shell(terminal_server):
+    """A pane on the normal screen with no mouse reporting needs no preamble."""
+    server, port = terminal_server
+    base_url = f"http://{server.host}:{port}"
+
+    _, session_payload = http_request(f"{base_url}/api/sessions", method="POST")
+    session = server._get_session(session_payload["session_id"])
+
+    assert session.mode_preamble() == ""
+
+
+def test_websocket_restores_pane_modes_on_connect(terminal_server):
+    """A client connecting mid-session is put into the modes the program set at startup."""
+    server, port = terminal_server
+    base_url = f"http://{server.host}:{port}"
+
+    _, session_payload = http_request(f"{base_url}/api/sessions", method="POST")
+    session_id = session_payload["session_id"]
+    start_full_screen_mouse_program(base_url, session_id, TMUX_SESSION_PREFIX + session_id)
+
+    sock = ws_connect(server.host, port, f"/api/sessions/{session_id}/ws")
+    try:
+        frames = ws_recv_frames(sock, timeout=2.0)
+    finally:
+        sock.close()
+
+    oob = b"".join(payload[1:] for opcode, payload in frames
+                   if opcode == 0x2 and payload[:1] == bytes([WS_BIN_OOB]))
+    assert b"\x1b[?1049h" in oob
+    assert b"\x1b[?1003h" in oob
+    assert b"\x1b[?1006h" in oob
 
 
 def test_client_html_uses_websocket(terminal_server):

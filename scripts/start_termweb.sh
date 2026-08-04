@@ -13,7 +13,12 @@ STDOUT_LOG="/tmp/termweb-web-terminal.out"
 STDERR_LOG="/tmp/termweb-web-terminal.err"
 SERVICE_LABEL="com.termweb.web-terminal"
 PORT="8765"
-PYTHON_BIN="${PYTHON_BIN:-/usr/local/bin/python3}"
+PYTHON_BIN="${PYTHON_BIN:-$(command -v python3 || true)}"
+
+if [[ -z "$PYTHON_BIN" || ! -x "$PYTHON_BIN" ]]; then
+  echo "error: python3 not found; set PYTHON_BIN to a valid interpreter (got '$PYTHON_BIN')" >&2
+  exit 1
+fi
 
 mkdir -p "$RUNTIME_DIR"
 cp "$PROJECT_ROOT/python/src/web_terminal/server.py" "$RUNTIME_FILE"

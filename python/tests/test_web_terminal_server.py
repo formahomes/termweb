@@ -21,7 +21,15 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from web_terminal.server import DEFAULT_HOST, TMUX_SESSION_PREFIX, WS_MAGIC, WebTerminalServer, create_https_context
+from web_terminal.server import (
+    BUFFER_TRIM_SLACK_CHARS,
+    DEFAULT_HOST,
+    MAX_BUFFER_CHARS,
+    TMUX_SESSION_PREFIX,
+    WS_MAGIC,
+    WebTerminalServer,
+    create_https_context,
+)
 
 OUTPUT_TIMEOUT_SECONDS = 5.0
 POLL_INTERVAL_SECONDS = 0.05
@@ -204,6 +212,65 @@ def test_session_accepts_input_and_streams_output(terminal_server):
 
     output_payload, _ = read_until(base_url, session_id, "__SAIBAI__")
     assert "__SAIBAI__" in output_payload["data"]
+
+
+def detached_session(server, port):
+    """Create a session and stop its tmux reader so the buffer only holds fed text."""
+    status, session_payload = http_request(
+        f"http://{server.host}:{port}/api/sessions", method="POST")
+    assert status == 201
+    session = server._get_session(session_payload["session_id"])
+    session.detach()
+    return session
+
+
+def test_session_buffer_stays_bounded(terminal_server):
+    """Output past the retention cap is dropped instead of growing without limit."""
+    server, port = terminal_server
+    session = detached_session(server, port)
+
+    chunk = "x" * 65536
+    for _ in range(3 * MAX_BUFFER_CHARS // len(chunk)):
+        session._append_output(chunk)
+
+    assert len(session._buffer) <= MAX_BUFFER_CHARS + BUFFER_TRIM_SLACK_CHARS
+
+
+def test_read_cursor_counts_dropped_output(terminal_server):
+    """Read cursors keep counting the whole stream after old output is dropped."""
+    server, port = terminal_server
+    session = detached_session(server, port)
+
+    start = session.read(cursor=0, timeout=0.0)["cursor"]
+
+    chunk = "x" * 65536
+    rounds = 3 * MAX_BUFFER_CHARS // len(chunk)
+    for _ in range(rounds):
+        session._append_output(chunk)
+    session._append_output("TAIL")
+    fed = rounds * len(chunk) + len("TAIL")
+
+    result = session.read(cursor=start, timeout=0.0)
+    assert result["cursor"] == start + fed
+    assert result["data"].endswith("TAIL")
+    assert len(result["data"]) < fed
+    assert len(result["data"]) <= MAX_BUFFER_CHARS + BUFFER_TRIM_SLACK_CHARS
+
+
+def test_tail_cursor_stays_on_the_read_cursor_scale(terminal_server):
+    """The tail replay cursor addresses the same stream positions read() reports."""
+    server, port = terminal_server
+    session = detached_session(server, port)
+
+    line = "y" * 1023 + "\n"
+    for _ in range(3 * MAX_BUFFER_CHARS // len(line)):
+        session._append_output(line)
+
+    end = session.read(cursor=0, timeout=0.0)["cursor"]
+    tail = session.tail_cursor(10)
+
+    assert tail <= end
+    assert session.read(cursor=tail, timeout=0.0)["data"] == line * 10
 
 
 def test_session_exposes_controlling_tty(terminal_server):

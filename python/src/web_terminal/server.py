@@ -33,6 +33,12 @@ PROCESS_EXIT_TIMEOUT = 1.0
 SERVER_SHUTDOWN_TIMEOUT = 2.0
 INPUT_BATCH_DELAY = 0.01
 DEFAULT_TAIL_LINES = 2000
+# tmux pipe-pane captures repaint traffic, not logical scrollback, so a
+# full-screen TUI emits hundreds of MB per hour. Retain a bounded window and
+# drop the oldest text past it; the slack makes trimming amortised rather than
+# a full buffer copy on every chunk.
+MAX_BUFFER_CHARS = 4 * 1024 * 1024
+BUFFER_TRIM_SLACK_CHARS = 1024 * 1024
 SESSION_PORT_BASE = 4000
 TMUX_SESSION_PREFIX = "termweb-"
 DEFAULT_SETTINGS_PATH = Path.home() / ".termweb-runtime" / "settings.json"
@@ -165,6 +171,7 @@ class TerminalSession:
         self.created_at = time.time()
         self.status = "idle"
         self._buffer = ""
+        self._dropped = 0
         self._closed = False
         self._lock = threading.Lock()
         self._output_ready = threading.Condition(self._lock)
@@ -195,6 +202,7 @@ class TerminalSession:
         obj.phone_notification_error = PHONE_NOTIFICATION_ERROR_NONE
         obj.created_at = time.time()
         obj.status = "idle"
+        obj._dropped = 0
         obj._closed = False
         obj._lock = threading.Lock()
         obj._output_ready = threading.Condition(obj._lock)
@@ -275,44 +283,61 @@ class TerminalSession:
         self._reader = threading.Thread(target=self._read_output, daemon=True)
         self._reader.start()
 
+    def _append_output(self, text: str) -> None:
+        """Append pane output, dropping the oldest text past the retention cap."""
+        with self._output_ready:
+            self._buffer += text
+            overflow = len(self._buffer) - MAX_BUFFER_CHARS
+            if overflow > BUFFER_TRIM_SLACK_CHARS:
+                self._buffer = self._buffer[overflow:]
+                self._dropped += overflow
+            self._output_ready.notify_all()
+
+    def end_cursor(self) -> int:
+        """Return the cursor one past the newest output, counting dropped text."""
+        with self._lock:
+            return self._dropped + len(self._buffer)
+
     def read(self, cursor: int, timeout: float) -> Dict[str, object]:
         with self._output_ready:
             if cursor < 0:
                 cursor = 0
             deadline = time.monotonic() + max(timeout, 0.0)
-            while not self._closed and cursor >= len(self._buffer):
+            while not self._closed and cursor >= self._dropped + len(self._buffer):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
                 self._output_ready.wait(remaining)
-            if cursor > len(self._buffer):
-                cursor = len(self._buffer)
-            data = self._buffer[cursor:]
+            end = self._dropped + len(self._buffer)
+            if cursor > end:
+                cursor = end
+            data = self._buffer[max(cursor - self._dropped, 0):]
             return {
                 "session_id": self.session_id,
-                "cursor": len(self._buffer),
+                "cursor": end,
                 "data": data,
                 "closed": self._closed,
             }
 
     def tail_cursor(self, n_lines: int) -> int:
-        """Return a buffer cursor that begins at the last n_lines of output."""
+        """Return a cursor that begins at the last n_lines of retained output."""
         with self._lock:
             buf = self._buffer
+            dropped = self._dropped
         if not buf or n_lines <= 0:
-            return len(buf)
+            return dropped + len(buf)
         idx = len(buf)
         if buf[idx - 1] == "\n":
             idx -= 1
         for _ in range(n_lines):
             nl = buf.rfind("\n", 0, idx)
             if nl == -1:
-                return 0
+                return dropped
             idx = nl
-        return idx + 1
+        return dropped + idx + 1
 
     def full_buffer(self) -> str:
-        """Return the full accumulated output buffer."""
+        """Return the retained output buffer, oldest kept character first."""
         with self._lock:
             return self._buffer
 
@@ -502,9 +527,7 @@ class TerminalSession:
                 raw = chunk.decode("utf-8", errors="replace")
                 text, oob_seqs = self._split_iterm2(raw)
                 if text:
-                    with self._output_ready:
-                        self._buffer += text
-                        self._output_ready.notify_all()
+                    self._append_output(text)
                 for seq in oob_seqs:
                     self._broadcast_oob(seq)
         finally:
@@ -589,10 +612,9 @@ WS_BIN_OOB = 0x01   # typed binary frame: out-of-band terminal data (write, don'
 
 def ws_relay(sock, reader, session: "TerminalSession", cursor_hint: Optional[int] = None) -> None:
     """Relay data between a WebSocket and a PTY session until either side closes."""
-    with session._lock:
-        buffer_len = len(session._buffer)
+    buffer_end = session.end_cursor()
     tail_start = session.tail_cursor(DEFAULT_TAIL_LINES)
-    if cursor_hint is not None and 0 <= cursor_hint <= buffer_len:
+    if cursor_hint is not None and 0 <= cursor_hint <= buffer_end:
         cursor = max(cursor_hint, tail_start)
     else:
         cursor = tail_start

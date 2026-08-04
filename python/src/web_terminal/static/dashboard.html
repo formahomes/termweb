@@ -1028,14 +1028,17 @@
 
       var notifySound = new Audio("/api/sounds/glass");
       notifySound.load();
+      // Firefox lets muted/volume-0 media play without a gesture, so a muted
+      // unlock never grants permission to play audible audio later. Unlock with
+      // an audible gesture-initiated play, then pause it immediately.
       document.addEventListener("click", function unlockAudio() {
-        notifySound.volume = 0;
         notifySound.play().then(function() {
           notifySound.pause();
           notifySound.currentTime = 0;
-          notifySound.volume = 1;
           document.removeEventListener("click", unlockAudio);
-        }).catch(function() {});
+        }).catch(function(e) {
+          console.warn("audio unlock failed:", e && e.name);
+        });
       });
 
       document.addEventListener("visibilitychange", function() {
@@ -1049,15 +1052,28 @@
         }
       });
 
-      var eventSource = new EventSource("/api/events");
-      eventSource.onmessage = function(event) {
-        var data = JSON.parse(event.data);
-        if (data.event === "done") {
-          notifySound.currentTime = 0;
-          notifySound.play().catch(function(e) { console.warn("audio play failed:", e); });
-        }
-        refreshSessions().catch(console.error);
-      };
+      var eventSource = null;
+      function connectEvents() {
+        if (eventSource) { eventSource.close(); }
+        eventSource = new EventSource("/api/events");
+        eventSource.onmessage = function(event) {
+          var data = JSON.parse(event.data);
+          if (data.event === "done") {
+            notifySound.currentTime = 0;
+            notifySound.play().catch(function(e) { console.warn("audio play failed:", e); });
+          }
+          refreshSessions().catch(console.error);
+        };
+        eventSource.onerror = function() {
+          // The browser auto-reconnects while readyState is CONNECTING; if it
+          // gave up (CLOSED), rebuild the stream so events keep flowing.
+          if (eventSource.readyState === EventSource.CLOSED) {
+            console.warn("event stream closed; reconnecting…");
+            setTimeout(connectEvents, 3000);
+          }
+        };
+      }
+      connectEvents();
 
       // --- Initialize ---
 

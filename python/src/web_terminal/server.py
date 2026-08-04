@@ -1361,11 +1361,12 @@ class TerminalRequestHandler(BaseHTTPRequestHandler):
         try:
             while True:
                 try:
-                    message = q.get(timeout=30.0)
+                    message = q.get(timeout=5.0)
                     self.wfile.write(message.encode("utf-8"))
                     self.wfile.flush()
                 except queue.Empty:
-                    # Send keepalive comment
+                    # Browsers drop an SSE stream left silent for ~10s, so send a
+                    # keepalive comment well under that window.
                     self.wfile.write(b": keepalive\n\n")
                     self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError, OSError):

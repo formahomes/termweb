@@ -593,13 +593,14 @@ def test_dashboard_page_served(terminal_server):
     assert "/api/settings" in body
 
 
-def test_dashboard_audio_only_plays_for_active_done_session(terminal_server):
-    """Dashboard audio only plays when the active session reports done."""
+def test_dashboard_audio_plays_for_any_done_session(terminal_server):
+    """Dashboard audio plays whenever any session reports done, foreground or not."""
     server, port = terminal_server
     status, body = http_request(f"http://{server.host}:{port}/dashboard")
 
     assert status == 200
-    assert 'data.event === "done" && data.session_id === activeSessionId' in body
+    assert 'if (data.event === "done") {' in body
+    assert "data.session_id === activeSessionId" not in body
 
 
 def test_notification_settings_url_can_be_saved(terminal_server):
@@ -957,6 +958,35 @@ def test_sse_sends_initial_primer(terminal_server):
 
     assert primer.startswith(b":")
     assert primer.endswith(b"\n\n")
+
+
+def test_sse_keepalive_arrives_before_browser_timeout(terminal_server):
+    """Browsers drop a silent SSE stream after ~10s, so the server must send a
+    keepalive comment well under that window to keep the stream established."""
+    server, port = terminal_server
+    base_url = f"http://{server.host}:{port}"
+
+    request = urllib.request.Request(f"{base_url}/api/events")
+    request.add_header("Accept", "text/event-stream")
+    with urllib.request.urlopen(request, timeout=9.0) as response:
+        primer = b""
+        while b"\n\n" not in primer:
+            chunk = response.read(1)
+            if not chunk:
+                break
+            primer += chunk
+        start = time.monotonic()
+        keepalive = b""
+        while b"\n\n" not in keepalive:
+            chunk = response.read(1)
+            if not chunk:
+                break
+            keepalive += chunk
+        elapsed = time.monotonic() - start
+
+    assert keepalive.startswith(b":")
+    assert keepalive.endswith(b"\n\n")
+    assert elapsed < 8.0
 
 
 def test_sessions_survive_server_restart(terminal_server):

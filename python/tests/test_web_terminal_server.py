@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+import tracemalloc
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -235,6 +236,23 @@ def test_session_buffer_stays_bounded(terminal_server):
         session._append_output(chunk)
 
     assert len(session._buffer) <= MAX_BUFFER_CHARS + BUFFER_TRIM_SLACK_CHARS
+
+
+def test_appending_small_output_does_not_copy_retained_buffer(terminal_server):
+    """Small output appends do not allocate another copy of retained output."""
+    server, port = terminal_server
+    session = detached_session(server, port)
+    session._append_output("x" * MAX_BUFFER_CHARS)
+
+    tracemalloc.start()
+    try:
+        tracemalloc.reset_peak()
+        session._append_output("y")
+        _, peak_bytes = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert peak_bytes < MAX_BUFFER_CHARS // 2
 
 
 def test_read_cursor_counts_dropped_output(terminal_server):

@@ -15,6 +15,7 @@ import subprocess
 import threading
 import time
 import uuid
+from collections import deque
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -35,8 +36,8 @@ INPUT_BATCH_DELAY = 0.01
 DEFAULT_TAIL_LINES = 2000
 # tmux pipe-pane captures repaint traffic, not logical scrollback, so a
 # full-screen TUI emits hundreds of MB per hour. Retain a bounded window and
-# drop the oldest text past it; the slack makes trimming amortised rather than
-# a full buffer copy on every chunk.
+# drop the oldest text past it. Chunks keep appends proportional to incoming
+# output, and the slack keeps trimming infrequent.
 MAX_BUFFER_CHARS = 4 * 1024 * 1024
 BUFFER_TRIM_SLACK_CHARS = 1024 * 1024
 SESSION_PORT_BASE = 4000
@@ -147,6 +148,61 @@ def create_https_context() -> ssl.SSLContext:
     return ssl.create_default_context()
 
 
+class RetainedOutput:
+    """Keep terminal output in appendable chunks with character-based offsets."""
+
+    def __init__(self, text: str = ""):
+        self._chunks = deque([text]) if text else deque()
+        self._length = len(text)
+
+    def __len__(self) -> int:
+        return self._length
+
+    def append(self, text: str) -> None:
+        if not text:
+            return
+        self._chunks.append(text)
+        self._length += len(text)
+
+    def discard(self, count: int) -> int:
+        """Discard up to count characters from the beginning and return the amount."""
+        discarded = min(max(count, 0), self._length)
+        remaining = discarded
+        while remaining:
+            chunk = self._chunks[0]
+            if remaining < len(chunk):
+                self._chunks[0] = chunk[remaining:]
+                break
+            remaining -= len(chunk)
+            self._chunks.popleft()
+        self._length -= discarded
+        return discarded
+
+    def read_from(self, start: int) -> str:
+        """Return retained characters from a zero-based offset."""
+        if start <= 0:
+            return self.text()
+        if start >= self._length:
+            return ""
+        remaining = self._length - start
+        parts = []
+        for chunk in reversed(self._chunks):
+            if not remaining:
+                break
+            if remaining >= len(chunk):
+                parts.append(chunk)
+                remaining -= len(chunk)
+            else:
+                parts.append(chunk[-remaining:])
+                break
+        parts.reverse()
+        return "".join(parts)
+
+    def text(self) -> str:
+        """Return all retained output as text."""
+        return "".join(self._chunks)
+
+
 
 class TerminalSession:
     """A single tmux-backed shell session using pipe-pane for output and send-keys for input."""
@@ -181,7 +237,7 @@ class TerminalSession:
         self.phone_notification_error = PHONE_NOTIFICATION_ERROR_NONE
         self.created_at = time.time()
         self.status = "idle"
-        self._buffer = ""
+        self._buffer = RetainedOutput()
         self._dropped = 0
         self._closed = False
         self._lock = threading.Lock()
@@ -243,9 +299,9 @@ class TerminalSession:
         if capture.returncode == 0 and capture.stdout:
             # Convert \n to \r\n for xterm.js and strip trailing blank lines
             lines = capture.stdout.rstrip("\n").split("\n")
-            obj._buffer = "\r\n".join(lines) + "\r\n"
+            obj._buffer = RetainedOutput("\r\n".join(lines) + "\r\n")
         else:
-            obj._buffer = ""
+            obj._buffer = RetainedOutput()
         obj._start_output_pipe()
         return obj
 
@@ -297,11 +353,10 @@ class TerminalSession:
     def _append_output(self, text: str) -> None:
         """Append pane output, dropping the oldest text past the retention cap."""
         with self._output_ready:
-            self._buffer += text
+            self._buffer.append(text)
             overflow = len(self._buffer) - MAX_BUFFER_CHARS
             if overflow > BUFFER_TRIM_SLACK_CHARS:
-                self._buffer = self._buffer[overflow:]
-                self._dropped += overflow
+                self._dropped += self._buffer.discard(overflow)
             self._output_ready.notify_all()
 
     def end_cursor(self) -> int:
@@ -322,7 +377,7 @@ class TerminalSession:
             end = self._dropped + len(self._buffer)
             if cursor > end:
                 cursor = end
-            data = self._buffer[max(cursor - self._dropped, 0):]
+            data = self._buffer.read_from(max(cursor - self._dropped, 0))
             return {
                 "session_id": self.session_id,
                 "cursor": end,
@@ -333,7 +388,7 @@ class TerminalSession:
     def tail_cursor(self, n_lines: int) -> int:
         """Return a cursor that begins at the last n_lines of retained output."""
         with self._lock:
-            buf = self._buffer
+            buf = self._buffer.text()
             dropped = self._dropped
         if not buf or n_lines <= 0:
             return dropped + len(buf)
@@ -350,7 +405,7 @@ class TerminalSession:
     def full_buffer(self) -> str:
         """Return the retained output buffer, oldest kept character first."""
         with self._lock:
-            return self._buffer
+            return self._buffer.text()
 
     def write(self, data: str) -> None:
         if not data:

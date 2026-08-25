@@ -88,3 +88,45 @@ cursors that clients hold (`?cursor=`, `lastCursor` in the JS) stay monotonic.
 Trim with hysteresis (cap + slack) so trimming is amortised. Everything that
 reports a cursor (`read`, `tail_cursor`, `ws_relay`) must return
 `_dropped + len(_buffer)` rather than `len(_buffer)`.
+
+## 2026-08-25 — Follow-up: bounded strings still copy the retention window
+
+Steve reported browser keystrokes becoming severely delayed after three or four
+Claude/Codex sessions matured. Six live sessions retained roughly 4–5 MB each.
+Although the cap prevented unbounded growth, every small repaint still executed
+`self._buffer += text` against the entire retained string.
+
+A five-second sample of the live server showed `PyUnicode_Concat` and its
+`memmove` as the dominant work on two output-reader threads. The sessions API
+rose from a healthy 16.6 ms mean to 191.6 ms during the slowdown even though the
+active sessions produced only about 9.5 KiB/s combined. Reader threads held the
+GIL while copying their 4–5 MB strings and held the per-session lock that browser
+input also needs.
+
+Firefox memory pressure amplified the delay: its GPU helper had a 9.9 GB
+physical footprint, another content process had a 3.0 GB footprint, compressed
+memory was about 10 GB, and 5.77 of 6 GB swap was in use. The OS data does not
+identify which tab owns every graphics allocation, so this remains a separate
+contributing condition rather than an attributed Termweb defect.
+
+### Outcome
+
+`RetainedOutput` now stores output in bounded pieces. Small writes coalesce only
+up to 16 KB, so continuous append copies are capped at 16 KB rather than the
+4–5 MB retention window. Reads at the live cursor walk backward through only the
+requested suffix. Trimming and all public cursor values retain their existing
+character-based semantics.
+
+Regression measurements:
+
+- Appending one character to a full 4 MB string allocated about 8.4 MB before
+  the fix; the regression test now stays below 2 MB.
+- 100,000 eight-character appends retained 5.7 MB of Python-object overhead in
+  the initial deque implementation. Bounded coalescing reduced traced memory to
+  about 0.8 MB and completed in 0.17 seconds.
+- The complete isolated suite passes: 44 tests in 34.69 seconds.
+
+The integration tests now remove inherited `TMUX` and use a short private tmux
+socket root. This prevents test teardown from discovering and detaching live
+Termweb sessions when pytest runs from inside one. The running service was not
+restarted while preparing this fix.

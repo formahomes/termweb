@@ -270,6 +270,24 @@ def test_appending_small_output_does_not_copy_retained_buffer(terminal_server):
     assert peak_bytes < MAX_BUFFER_CHARS // 2
 
 
+def test_small_output_appends_do_not_retain_per_append_overhead(terminal_server):
+    """Retained output groups small appends into memory-efficient pieces."""
+    server, port = terminal_server
+    session = detached_session(server, port)
+    session._append_output("x" * MAX_BUFFER_CHARS)
+
+    tracemalloc.start()
+    try:
+        tracemalloc.reset_peak()
+        for index in range(100_000):
+            session._append_output(f"{index:08x}")
+        _, peak_bytes = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert peak_bytes < 2 * BUFFER_TRIM_SLACK_CHARS
+
+
 def test_read_cursor_counts_dropped_output(terminal_server):
     """Read cursors keep counting the whole stream after old output is dropped."""
     server, port = terminal_server

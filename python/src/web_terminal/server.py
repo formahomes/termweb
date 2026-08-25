@@ -30,6 +30,7 @@ DEFAULT_COLS = 120
 DEFAULT_ROWS = 32
 DEFAULT_OUTPUT_TIMEOUT = 0.25
 DEFAULT_READ_SIZE = 4096
+OUTPUT_CHUNK_CHARS = 16 * 1024
 PROCESS_EXIT_TIMEOUT = 1.0
 SERVER_SHUTDOWN_TIMEOUT = 2.0
 INPUT_BATCH_DELAY = 0.01
@@ -161,7 +162,11 @@ class RetainedOutput:
     def append(self, text: str) -> None:
         if not text:
             return
-        self._chunks.append(text)
+        if (self._chunks
+                and len(self._chunks[-1]) + len(text) <= OUTPUT_CHUNK_CHARS):
+            self._chunks[-1] += text
+        else:
+            self._chunks.append(text)
         self._length += len(text)
 
     def discard(self, count: int) -> int:

@@ -10,6 +10,7 @@ import ssl
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import tracemalloc
@@ -35,6 +36,10 @@ from web_terminal.server import (
 
 OUTPUT_TIMEOUT_SECONDS = 5.0
 POLL_INTERVAL_SECONDS = 0.05
+TEST_TMUX_PREFIX = "termweb-tests-"
+TEST_TMUX_ROOT = "/tmp"
+TMUX_ENV = "TMUX"
+TMUX_TMPDIR_ENV = "TMUX_TMPDIR"
 
 
 def get_free_port():
@@ -64,6 +69,16 @@ def http_request(url, method="GET", payload=None):
         if "application/json" in content_type:
             return response.status, json.loads(body)
         return response.status, body
+
+
+@pytest.fixture(autouse=True)
+def test_tmux_server(monkeypatch):
+    """Give each test a private tmux server that cannot discover live sessions."""
+    with tempfile.TemporaryDirectory(
+            prefix=TEST_TMUX_PREFIX, dir=TEST_TMUX_ROOT) as socket_root:
+        monkeypatch.delenv(TMUX_ENV, raising=False)
+        monkeypatch.setenv(TMUX_TMPDIR_ENV, socket_root)
+        yield
 
 
 @pytest.fixture

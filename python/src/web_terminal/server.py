@@ -5,13 +5,16 @@ import argparse
 import base64
 import hashlib
 import json
+import logging
 import os
 import queue
 import select
+import signal
 import shutil
 import socket
 import ssl
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -35,6 +38,7 @@ PROCESS_EXIT_TIMEOUT = 1.0
 SERVER_SHUTDOWN_TIMEOUT = 2.0
 INPUT_BATCH_DELAY = 0.01
 DEFAULT_TAIL_LINES = 2000
+SESSION_METADATA_FILENAME = "sessions.json"
 # tmux pipe-pane captures repaint traffic, not logical scrollback, so a
 # full-screen TUI emits hundreds of MB per hour. Retain a bounded window and
 # drop the oldest text past it. Chunks keep appends proportional to incoming
@@ -81,6 +85,7 @@ TMUX_BIN = (
     or "tmux"
 )
 DEFAULT_STATIC_DIR = Path(__file__).resolve().parent / "static"
+LOGGER = logging.getLogger(__name__)
 
 
 def list_directories(prefix: str) -> Dict[str, list]:
@@ -258,21 +263,26 @@ class TerminalSession:
 
     @classmethod
     def recover(cls, session_id: str, shell: str, cwd: str,
+                label: Optional[str] = None, port: Optional[int] = None,
+                repo_path: Optional[str] = None,
+                worktree_path: Optional[str] = None,
+                created_at: Optional[float] = None,
+                server_url: Optional[str] = None,
                 phone_notifications_enabled: bool = False) -> "TerminalSession":
         """Reattach to an existing tmux session without creating a new one."""
         obj = cls.__new__(cls)
         obj.shell = shell
         obj.cwd = cwd
         obj.session_id = session_id
-        obj.label = cls._next_label()
-        obj.port = None
-        obj.repo_path = None
-        obj.worktree_path = None
-        obj.server_url = None
+        obj.label = label or cls._next_label()
+        obj.port = port
+        obj.repo_path = repo_path
+        obj.worktree_path = worktree_path
+        obj.server_url = server_url
         obj.phone_notifications_enabled = phone_notifications_enabled
         obj.phone_notification_status = PHONE_NOTIFICATION_STATUS_IDLE
         obj.phone_notification_error = PHONE_NOTIFICATION_ERROR_NONE
-        obj.created_at = time.time()
+        obj.created_at = created_at if created_at is not None else time.time()
         obj.status = "idle"
         obj._dropped = 0
         obj._closed = False
@@ -284,6 +294,23 @@ class TerminalSession:
         obj._oob_subscribers = []
         obj._oob_lock = threading.Lock()
         obj._tmux_name = TMUX_SESSION_PREFIX + session_id
+        if obj.port is None:
+            environment = subprocess.run(
+                [TMUX_BIN, "show-environment", "-t", obj._tmux_name, "TERMWEB_PORT"],
+                capture_output=True, text=True,
+            )
+            if environment.returncode == 0 and "=" in environment.stdout:
+                try:
+                    obj.port = int(environment.stdout.strip().split("=", 1)[1])
+                except ValueError:
+                    pass
+        if obj.server_url is None:
+            environment = subprocess.run(
+                [TMUX_BIN, "show-environment", "-t", obj._tmux_name, "TERMWEB_URL"],
+                capture_output=True, text=True,
+            )
+            if environment.returncode == 0 and "=" in environment.stdout:
+                obj.server_url = environment.stdout.strip().split("=", 1)[1]
         info = subprocess.run(
             [TMUX_BIN, "display-message", "-t", obj._tmux_name, "-p",
              "#{window_width} #{window_height}"],
@@ -848,10 +875,14 @@ class WebTerminalServer:
         self.cwd = cwd or str(Path.home())
         self.static_dir = Path(static_dir) if static_dir else DEFAULT_STATIC_DIR
         self.settings_path = Path(settings_path) if settings_path else DEFAULT_SETTINGS_PATH
+        self.session_metadata_path = self.settings_path.with_name(SESSION_METADATA_FILENAME)
         self._httpd: Optional[ThreadingHTTPServer] = None
         self._running = False
+        self._shutdown_requested = threading.Event()
         self._sessions: Dict[str, TerminalSession] = {}
         self._sessions_lock = threading.Lock()
+        self._session_metadata: Dict[str, Dict[str, object]] = {}
+        self._session_metadata_lock = threading.Lock()
         self._sse_clients: list = []
         self._sse_lock = threading.Lock()
         self._settings_lock = threading.Lock()
@@ -860,6 +891,7 @@ class WebTerminalServer:
             SETTINGS_SESSION_NOTIFICATIONS_KEY: {},
         }
         self._load_settings()
+        self._load_session_metadata()
 
     def is_running(self) -> bool:
         return self._running
@@ -881,6 +913,70 @@ class WebTerminalServer:
         with self._settings_lock:
             self._settings[SETTINGS_NTFY_URL_KEY] = ntfy_url
             self._settings[SETTINGS_SESSION_NOTIFICATIONS_KEY] = session_notifications
+
+    def _load_session_metadata(self) -> None:
+        try:
+            payload = json.loads(self.session_metadata_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return
+        if not isinstance(payload, dict):
+            return
+        records = {
+            session_id: record
+            for session_id, record in payload.items()
+            if isinstance(session_id, str) and isinstance(record, dict)
+        }
+        with self._session_metadata_lock:
+            self._session_metadata = records
+
+    def _save_session_metadata(self) -> None:
+        with self._session_metadata_lock:
+            payload = dict(self._session_metadata)
+        self.session_metadata_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary_path = tempfile.mkstemp(
+            prefix=f".{SESSION_METADATA_FILENAME}.",
+            dir=self.session_metadata_path.parent,
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                fd = None
+                json.dump(payload, stream, indent=2)
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary_path, self.session_metadata_path)
+        except OSError:
+            LOGGER.exception("Could not save session metadata to %s", self.session_metadata_path)
+        finally:
+            if fd is not None:
+                os.close(fd)
+            try:
+                os.unlink(temporary_path)
+            except FileNotFoundError:
+                pass
+
+    @staticmethod
+    def _session_record(session: TerminalSession) -> Dict[str, object]:
+        return {
+            "label": session.label,
+            "port": session.port,
+            "cwd": session.cwd,
+            "shell": session.shell,
+            "repo_path": session.repo_path,
+            "worktree_path": session.worktree_path,
+            "created_at": session.created_at,
+            "server_url": session.server_url,
+        }
+
+    def _remember_session(self, session: TerminalSession) -> None:
+        with self._session_metadata_lock:
+            self._session_metadata[session.session_id] = self._session_record(session)
+        self._save_session_metadata()
+
+    def _forget_session(self, session_id: str) -> None:
+        with self._session_metadata_lock:
+            self._session_metadata.pop(session_id, None)
+        self._save_session_metadata()
 
     def _save_settings(self) -> None:
         with self._settings_lock:
@@ -959,24 +1055,54 @@ class WebTerminalServer:
             capture_output=True, text=True,
         )
         if result.returncode != 0:
+            LOGGER.warning("Could not list tmux sessions during recovery: %s", result.stderr.strip())
             return
         prefix = TMUX_SESSION_PREFIX
+        metadata_changed = False
         for name in result.stdout.strip().splitlines():
             if not name.startswith(prefix):
                 continue
             session_id = name[len(prefix):]
             if session_id in self._sessions:
                 continue
+            with self._session_metadata_lock:
+                record = dict(self._session_metadata.get(session_id, {}))
+            label = record.get("label") if isinstance(record.get("label"), str) else None
+            record_port = record.get("port")
+            port = record_port if isinstance(record_port, int) and not isinstance(record_port, bool) else None
+            cwd = record.get("cwd") if isinstance(record.get("cwd"), str) else self.cwd
+            shell = record.get("shell") if isinstance(record.get("shell"), str) else self.shell
+            repo_path = record.get("repo_path") if isinstance(record.get("repo_path"), str) else None
+            worktree_path = (
+                record.get("worktree_path")
+                if isinstance(record.get("worktree_path"), str) else None
+            )
+            created_at = record.get("created_at")
+            if not isinstance(created_at, (int, float)) or isinstance(created_at, bool):
+                created_at = None
+            server_url = record.get("server_url") if isinstance(record.get("server_url"), str) else None
             try:
                 session = TerminalSession.recover(
                     session_id=session_id,
-                    shell=self.shell,
-                    cwd=self.cwd,
+                    shell=shell,
+                    cwd=cwd,
+                    label=label,
+                    port=port,
+                    repo_path=repo_path,
+                    worktree_path=worktree_path,
+                    created_at=created_at,
+                    server_url=server_url,
                     phone_notifications_enabled=self._session_phone_notifications_enabled(session_id),
                 )
                 self._sessions[session_id] = session
+                if not record:
+                    with self._session_metadata_lock:
+                        self._session_metadata[session_id] = self._session_record(session)
+                    metadata_changed = True
             except Exception:
-                pass
+                LOGGER.exception("Could not recover tmux session %s", session_id)
+        if metadata_changed:
+            self._save_session_metadata()
 
     def serve_forever(self) -> None:
         class TerminalHTTPServer(ThreadingHTTPServer):
@@ -988,18 +1114,26 @@ class WebTerminalServer:
         self._httpd.service = self
         self._running = True
         try:
-            self._httpd.serve_forever()
+            if not self._shutdown_requested.is_set():
+                self._httpd.serve_forever()
         finally:
             self._running = False
             self.detach_all_sessions()
             self._httpd.server_close()
 
     def shutdown(self) -> None:
+        self._shutdown_requested.set()
         if self._httpd is not None:
             self._httpd.shutdown()
             deadline = time.monotonic() + SERVER_SHUTDOWN_TIMEOUT
             while self._running and time.monotonic() < deadline:
                 time.sleep(0.01)
+
+    def request_shutdown(self) -> None:
+        """Request shutdown from a signal handler without blocking the server thread."""
+        self._shutdown_requested.set()
+        if self._running:
+            threading.Thread(target=self.shutdown, daemon=True).start()
 
     def _next_port(self) -> int:
         """Find the next available port starting from SESSION_PORT_BASE."""
@@ -1046,6 +1180,7 @@ class WebTerminalServer:
         )
         with self._sessions_lock:
             self._sessions[session.session_id] = session
+        self._remember_session(session)
         return session.info()
 
     def list_sessions(self) -> Dict[str, object]:
@@ -1068,6 +1203,7 @@ class WebTerminalServer:
         session = self._get_session(session_id)
         with session._lock:
             session.label = label
+        self._remember_session(session)
         return session.info()
 
     def set_phone_notifications(self, session_id: str, enabled: object) -> Dict[str, object]:
@@ -1090,6 +1226,7 @@ class WebTerminalServer:
         repo_path = session.repo_path
         worktree_path = session.worktree_path
         session.close()
+        self._forget_session(session_id)
         if repo_path and worktree_path and os.path.isdir(worktree_path):
             subprocess.run(
                 ["git", "-C", repo_path, "worktree", "remove", "--force", worktree_path],
@@ -1112,6 +1249,10 @@ class WebTerminalServer:
             self._sessions.clear()
         for session in sessions:
             session.close()
+        with self._session_metadata_lock:
+            for session in sessions:
+                self._session_metadata.pop(session.session_id, None)
+        self._save_session_metadata()
 
     VALID_NOTIFY_EVENTS = {"processing", "done", "idle"}
 
@@ -1547,6 +1688,13 @@ def main() -> None:
         cwd=args.cwd,
         static_dir=args.static_dir,
     )
+
+    def handle_signal(signum, _frame) -> None:
+        LOGGER.info("Received signal %s; stopping Termweb", signum)
+        server.request_shutdown()
+
+    signal.signal(signal.SIGTERM, handle_signal)
+    signal.signal(signal.SIGINT, handle_signal)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

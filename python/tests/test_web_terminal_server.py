@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import socket
+import signal
 import ssl
 import struct
 import subprocess
@@ -1267,3 +1268,177 @@ def test_sessions_survive_server_restart(terminal_server):
         server2.detach_all_sessions()
         server2.shutdown()
         server2_thread.join(timeout=OUTPUT_TIMEOUT_SECONDS)
+
+
+def test_session_metadata_survives_server_restart(tmp_path):
+    """Recovered sessions retain identity and port metadata."""
+    settings_path = tmp_path / "settings.json"
+    port = get_free_port()
+    server = WebTerminalServer(
+        host=DEFAULT_HOST,
+        port=port,
+        shell="/bin/sh",
+        settings_path=settings_path,
+    )
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    deadline = time.time() + OUTPUT_TIMEOUT_SECONDS
+    while time.time() < deadline and not server.is_running():
+        time.sleep(POLL_INTERVAL_SECONDS)
+
+    base_url = f"http://{server.host}:{port}"
+    _, session_payload = http_request(
+        f"{base_url}/api/sessions",
+        method="POST",
+        payload={"label": "remembered", "port": 4555},
+    )
+    session_id = session_payload["session_id"]
+    created_at = session_payload["created_at"]
+    server.shutdown()
+    server_thread.join(timeout=OUTPUT_TIMEOUT_SECONDS)
+
+    port2 = get_free_port()
+    server2 = WebTerminalServer(
+        host=DEFAULT_HOST,
+        port=port2,
+        shell="/bin/sh",
+        settings_path=settings_path,
+    )
+    server2_thread = threading.Thread(target=server2.serve_forever, daemon=True)
+    server2_thread.start()
+    deadline = time.time() + OUTPUT_TIMEOUT_SECONDS
+    while time.time() < deadline and not server2.is_running():
+        time.sleep(POLL_INTERVAL_SECONDS)
+
+    try:
+        _, sessions_payload = http_request(
+            f"http://{server2.host}:{port2}/api/sessions")
+        recovered = next(
+            session for session in sessions_payload["sessions"]
+            if session["session_id"] == session_id
+        )
+        assert recovered["label"] == "remembered"
+        assert recovered["port"] == 4555
+        assert recovered["created_at"] == created_at
+    finally:
+        server2.close_session(session_id)
+        server2.shutdown()
+        server2_thread.join(timeout=OUTPUT_TIMEOUT_SECONDS)
+
+
+def test_request_shutdown_stops_server_without_killing_sessions(tmp_path):
+    """A shutdown request detaches the server while leaving tmux alive."""
+    port = get_free_port()
+    server = WebTerminalServer(
+        host=DEFAULT_HOST,
+        port=port,
+        shell="/bin/sh",
+        settings_path=tmp_path / "settings.json",
+    )
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    deadline = time.time() + OUTPUT_TIMEOUT_SECONDS
+    while time.time() < deadline and not server.is_running():
+        time.sleep(POLL_INTERVAL_SECONDS)
+
+    base_url = f"http://{server.host}:{port}"
+    _, session_payload = http_request(f"{base_url}/api/sessions", method="POST")
+    session_id = session_payload["session_id"]
+    tmux_name = TMUX_SESSION_PREFIX + session_id
+
+    server.request_shutdown()
+    server_thread.join(timeout=OUTPUT_TIMEOUT_SECONDS)
+
+    try:
+        assert not server_thread.is_alive()
+        result = subprocess.run(
+            ["tmux", "has-session", "-t", tmux_name],
+            capture_output=True,
+        )
+        assert result.returncode == 0
+    finally:
+        subprocess.run(["tmux", "kill-session", "-t", tmux_name], capture_output=True)
+
+
+def test_sigterm_restart_recovers_session_metadata(tmp_path):
+    """A real SIGTERM restart preserves the session for the next server."""
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    static_dir = os.path.join(project_root, "python", "src", "web_terminal", "static")
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    environment = os.environ.copy()
+    environment["HOME"] = str(home_dir)
+    environment.pop("TMUX", None)
+    port = get_free_port()
+    base_command = [
+        sys.executable,
+        os.path.join(project_root, "python", "src", "web_terminal", "server.py"),
+        "--host", DEFAULT_HOST,
+        "--port", str(port),
+        "--shell", "/bin/sh",
+        "--static-dir", static_dir,
+    ]
+    processes = []
+    session_id = None
+
+    def wait_until_ready(process):
+        deadline = time.time() + OUTPUT_TIMEOUT_SECONDS
+        while time.time() < deadline:
+            if process.poll() is not None:
+                pytest.fail(f"server exited before becoming ready: {process.returncode}")
+            try:
+                status, _ = http_request(f"http://{DEFAULT_HOST}:{port}/api/sessions")
+                if status == 200:
+                    return
+            except urllib.error.URLError:
+                time.sleep(POLL_INTERVAL_SECONDS)
+        pytest.fail("server did not become ready")
+
+    try:
+        first = subprocess.Popen(
+            base_command,
+            env=environment,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        processes.append(first)
+        wait_until_ready(first)
+        _, payload = http_request(
+            f"http://{DEFAULT_HOST}:{port}/api/sessions",
+            method="POST",
+            payload={"label": "sigterm-survives", "port": 4666},
+        )
+        session_id = payload["session_id"]
+
+        first.send_signal(signal.SIGTERM)
+        first.wait(timeout=OUTPUT_TIMEOUT_SECONDS)
+
+        second = subprocess.Popen(
+            base_command,
+            env=environment,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        processes.append(second)
+        wait_until_ready(second)
+        _, sessions = http_request(f"http://{DEFAULT_HOST}:{port}/api/sessions")
+        recovered = next(
+            session for session in sessions["sessions"]
+            if session["session_id"] == session_id
+        )
+        assert recovered["label"] == "sigterm-survives"
+        assert recovered["port"] == 4666
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.send_signal(signal.SIGTERM)
+                try:
+                    process.wait(timeout=OUTPUT_TIMEOUT_SECONDS)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+        if session_id:
+            subprocess.run(
+                ["tmux", "kill-session", "-t", TMUX_SESSION_PREFIX + session_id],
+                capture_output=True,
+            )

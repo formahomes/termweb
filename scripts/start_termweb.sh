@@ -90,7 +90,7 @@ launchctl remove "$SERVICE_LABEL" >/dev/null 2>&1 || true
 wait_for_port_free() {
   local attempt=0
   while (( attempt < STOP_ATTEMPTS )); do
-    if ! lsof -ti :"$PORT" >/dev/null 2>&1; then
+    if ! lsof -tiTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
       return 0
     fi
     sleep "$POLL_INTERVAL_SECONDS"
@@ -100,11 +100,11 @@ wait_for_port_free() {
 }
 
 # Ask the running server to detach cleanly before using its runtime file.
-STALE_PIDS="$(lsof -ti :"$PORT" 2>/dev/null || true)"
+STALE_PIDS="$(lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true)"
 if [[ -n "$STALE_PIDS" ]]; then
   kill -TERM ${(f)STALE_PIDS} 2>/dev/null || true
   if ! wait_for_port_free; then
-    STALE_PIDS="$(lsof -ti :"$PORT" 2>/dev/null || true)"
+    STALE_PIDS="$(lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true)"
     if [[ -n "$STALE_PIDS" ]]; then
       kill -KILL ${(f)STALE_PIDS} 2>/dev/null || true
     fi

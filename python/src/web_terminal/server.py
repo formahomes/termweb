@@ -3,6 +3,7 @@
 
 import argparse
 import base64
+import codecs
 import hashlib
 import json
 import logging
@@ -625,6 +626,7 @@ class TerminalSession:
 
     def _read_output(self) -> None:
         """Read pane output from the named pipe."""
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         try:
             while not self._closed:
                 try:
@@ -640,7 +642,7 @@ class TerminalSession:
                 if not chunk:
                     time.sleep(0.05)
                     continue
-                raw = chunk.decode("utf-8", errors="replace")
+                raw = decoder.decode(chunk)
                 text, oob_seqs = self._split_iterm2(raw)
                 if text:
                     self._append_output(text)

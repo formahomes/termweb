@@ -41,6 +41,9 @@ TEST_TMUX_PREFIX = "termweb-tests-"
 TEST_TMUX_ROOT = "/tmp"
 TMUX_ENV = "TMUX"
 TMUX_TMPDIR_ENV = "TMUX_TMPDIR"
+UTF8_READ_SIZES = (1, 2, 3)
+UTF8_TEXT = "é⠈漢😀"
+OUTPUT_END_MARKER = "__OUTPUT_END__"
 
 
 def get_free_port():
@@ -240,6 +243,33 @@ def detached_session(server, port):
     session = server._get_session(session_payload["session_id"])
     session.detach()
     return session
+
+
+@pytest.mark.parametrize("read_size", UTF8_READ_SIZES)
+def test_terminal_output_preserves_split_characters(terminal_server, monkeypatch, read_size):
+    """Multibyte terminal characters survive reads ending inside their bytes."""
+    monkeypatch.setattr("web_terminal.server.DEFAULT_READ_SIZE", read_size)
+    server, port = terminal_server
+    base_url = f"http://{server.host}:{port}"
+    _, session_payload = http_request(f"{base_url}/api/sessions", method="POST")
+    session_id = session_payload["session_id"]
+    encoded = "".join(f"\\{byte:03o}" for byte in
+                      (UTF8_TEXT + OUTPUT_END_MARKER).encode("utf-8"))
+    http_request(
+        f"{base_url}/api/sessions/{session_id}/input", method="POST",
+        payload={"data": f"printf '{encoded}'\n"},
+    )
+    session = server._get_session(session_id)
+    cursor = 0
+    output = ""
+    deadline = time.monotonic() + OUTPUT_TIMEOUT_SECONDS
+    while OUTPUT_END_MARKER not in output and time.monotonic() < deadline:
+        result = session.read(cursor, timeout=POLL_INTERVAL_SECONDS)
+        cursor = result["cursor"]
+        output += result["data"]
+
+    assert UTF8_TEXT + OUTPUT_END_MARKER in output
+    assert "\ufffd" not in output
 
 
 def test_session_buffer_stays_bounded(terminal_server):

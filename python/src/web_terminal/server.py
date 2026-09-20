@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import queue
+import re
 import select
 import signal
 import shutil
@@ -58,6 +59,22 @@ MODE_RESTORE_SEQUENCES = (
     ("mouse_any_flag", "\x1b[?1003h"),
     ("mouse_sgr_flag", "\x1b[?1006h"),
 )
+SCREEN_RESET = "\x18\x1bc"
+SCREEN_CURSOR_FIELDS = (
+    "cursor_x", "cursor_y", "cursor_flag",
+    "scroll_region_upper", "scroll_region_lower",
+)
+CURSOR_POSITION = "\x1b[{row};{col}H"
+SCROLL_REGION = "\x1b[{top};{bottom}r"
+CURSOR_VISIBLE = "\x1b[?25h"
+CURSOR_HIDDEN = "\x1b[?25l"
+SCREEN_FIELDS = tuple(flag for flag, _ in MODE_RESTORE_SEQUENCES) + SCREEN_CURSOR_FIELDS
+PANE_OUTPUT_ESCAPE = re.compile(rb"\\([0-7]{3})")
+CONNECTION_READ_SIZE = 64 * 1024
+CONNECTION_READ_TIMEOUT = 0.5
+CONNECTION_START_TIMEOUT = 5.0
+CONNECTION_FLAGS = "ignore-size,no-output"
+CONNECTION_OUTPUT_FLAGS = "!no-output"
 TMUX_SESSION_PREFIX = "termweb-"
 DEFAULT_SETTINGS_PATH = Path.home() / ".termweb-runtime" / "settings.json"
 SETTINGS_NTFY_URL_KEY = "ntfy_url"
@@ -212,6 +229,110 @@ class RetainedOutput:
     def text(self) -> str:
         """Return all retained output as text."""
         return "".join(self._chunks)
+
+
+class TerminalConnection:
+    """Read a pane snapshot and subsequent output from one ordered connection."""
+
+    def __init__(self, target: str, history_lines: int = DEFAULT_TAIL_LINES):
+        query = " ".join("#{" + field + "}" for field in SCREEN_FIELDS + ("pane_id",))
+        self._pending = b""
+        self._process = subprocess.Popen(
+            [TMUX_BIN, "-C", "attach-session", "-E", "-f", CONNECTION_FLAGS, "-t", target,
+             ";", "display-message", "-t", target, "-p", query,
+             ";", "capture-pane", "-t", target, "-p", "-e", "-S", str(-history_lines),
+             ";", "capture-pane", "-t", target, "-p", "-P", "-C",
+             ";", "refresh-client", "-f", CONNECTION_OUTPUT_FLAGS],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        )
+        try:
+            self._read_block()
+            state = self._read_block().decode("utf-8").split()
+            self._pane_id = state.pop().encode("ascii")
+            content = self._read_block().decode("utf-8")
+            pending = self._decode_output(self._read_block().removesuffix(b"\n"))
+            self._read_block()
+            self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+            self.snapshot = self._screen(state, content) + self._decoder.decode(pending)
+        except Exception:
+            self.close()
+            raise
+
+    @staticmethod
+    def _decode_output(data: bytes) -> bytes:
+        return PANE_OUTPUT_ESCAPE.sub(lambda match: bytes([int(match[1], 8)]), data)
+
+    @staticmethod
+    def _screen(state, content: str) -> str:
+        values = dict(zip(SCREEN_FIELDS, map(int, state)))
+        modes = "".join(sequence for flag, sequence in MODE_RESTORE_SEQUENCES
+                        if values[flag])
+        screen = content.removesuffix("\n").replace("\n", "\r\n")
+        region = SCROLL_REGION.format(top=values["scroll_region_upper"] + 1,
+                                      bottom=values["scroll_region_lower"] + 1)
+        cursor = CURSOR_POSITION.format(row=values["cursor_y"] + 1,
+                                        col=values["cursor_x"] + 1)
+        visibility = CURSOR_VISIBLE if values["cursor_flag"] else CURSOR_HIDDEN
+        return SCREEN_RESET + modes + screen + region + cursor + visibility
+
+    def _read_line(self, timeout: float):
+        deadline = time.monotonic() + timeout
+        while b"\n" not in self._pending:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not select.select([self._process.stdout], [], [], remaining)[0]:
+                return None
+            chunk = os.read(self._process.stdout.fileno(), CONNECTION_READ_SIZE)
+            if not chunk:
+                raise EOFError("Terminal connection closed")
+            self._pending += chunk
+        line, _, self._pending = self._pending.partition(b"\n")
+        return line
+
+    def _read_block(self):
+        deadline = time.monotonic() + CONNECTION_START_TIMEOUT
+        end = None
+        error = None
+        lines = []
+        while True:
+            line = self._read_line(max(deadline - time.monotonic(), 0.0))
+            if line is None:
+                raise TimeoutError("Terminal snapshot timed out")
+            if end is None:
+                if line.startswith(b"%begin "):
+                    end = b"%end " + line.split(b" ", 1)[1]
+                    error = b"%error " + line.split(b" ", 1)[1]
+                elif line.startswith(b"%exit"):
+                    raise EOFError("Terminal connection closed")
+            elif line == end:
+                return b"".join(lines)
+            elif line == error:
+                raise RuntimeError(b"".join(lines).decode("utf-8", errors="replace"))
+            else:
+                lines.append(line + b"\n")
+
+    def read(self, timeout: float = CONNECTION_READ_TIMEOUT) -> str:
+        line = self._read_line(timeout)
+        if line is None:
+            return ""
+        if line.startswith(b"%exit"):
+            raise EOFError("Terminal connection closed")
+        if line.startswith(b"%output "):
+            _, pane_id, data = line.split(b" ", 2)
+            if pane_id == self._pane_id:
+                return self._decoder.decode(self._decode_output(data))
+        return ""
+
+    def close(self) -> None:
+        """Detach the connection while leaving the pane running."""
+        if self._process.poll() is None:
+            self._process.terminate()
+            try:
+                self._process.wait(timeout=PROCESS_EXIT_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                self._process.kill()
+                self._process.wait()
+        self._process.stdin.close()
+        self._process.stdout.close()
 
 
 
@@ -730,12 +851,7 @@ WS_BIN_OOB = 0x01   # typed binary frame: out-of-band terminal data (write, don'
 
 def ws_relay(sock, reader, session: "TerminalSession", cursor_hint: Optional[int] = None) -> None:
     """Relay data between a WebSocket and a PTY session until either side closes."""
-    buffer_end = session.end_cursor()
-    tail_start = session.tail_cursor(DEFAULT_TAIL_LINES)
-    if cursor_hint is not None and 0 <= cursor_hint <= buffer_end:
-        cursor = max(cursor_hint, tail_start)
-    else:
-        cursor = tail_start
+    cursor = session.end_cursor()
 
     send_lock = threading.Lock()
     dead = [False]
@@ -751,36 +867,33 @@ def ws_relay(sock, reader, session: "TerminalSession", cursor_hint: Optional[int
                 dead[0] = True
                 return False
 
-    if not send(WS_OP_BINARY, bytes([WS_BIN_META]) + json.dumps({"cursor": cursor}).encode("utf-8")):
-        return
-
-    # Restore the pane's modes before replaying content, so the replayed frame
-    # lands on the screen the program is actually drawing to.
-    preamble = session.mode_preamble()
-    if preamble and not send(WS_OP_BINARY, bytes([WS_BIN_OOB]) + preamble.encode("utf-8")):
-        return
-
-    def on_oob(seq: str) -> None:
-        send(WS_OP_BINARY, bytes([WS_BIN_OOB]) + seq.encode("utf-8"))
-
-    session.subscribe_oob(on_oob)
-
-    def send_output():
-        nonlocal cursor
-        while not session._closed and not dead[0]:
-            result = session.read(cursor=cursor, timeout=0.5)
-            cursor = result["cursor"]
-            if result["data"]:
-                if not send(WS_OP_TEXT, result["data"].encode("utf-8")):
-                    return
-            if result["closed"]:
-                send(WS_OP_CLOSE, b"")
-                return
-
-    output_thread = threading.Thread(target=send_output, daemon=True)
-    output_thread.start()
-
+    connection = None
+    output_thread = None
     try:
+        connection = TerminalConnection(session._tmux_name)
+        if not send(WS_OP_BINARY, bytes([WS_BIN_META]) + json.dumps({"cursor": cursor}).encode("utf-8")):
+            return
+        if not send(WS_OP_BINARY, bytes([WS_BIN_OOB]) + connection.snapshot.encode("utf-8")):
+            return
+
+        def send_output():
+            try:
+                while not session._closed and not dead[0]:
+                    data = connection.read()
+                    if data and not send(WS_OP_TEXT, data.encode("utf-8")):
+                        break
+            except (OSError, EOFError):
+                pass
+            finally:
+                send(WS_OP_CLOSE, b"")
+                try:
+                    sock.shutdown(socket.SHUT_RD)
+                except OSError:
+                    pass
+
+        output_thread = threading.Thread(target=send_output, daemon=True)
+        output_thread.start()
+
         while True:
             frame = ws_read_frame(reader)
             if frame is None:
@@ -793,12 +906,16 @@ def ws_relay(sock, reader, session: "TerminalSession", cursor_hint: Optional[int
             elif opcode == WS_OP_CLOSE:
                 send(WS_OP_CLOSE, b"")
                 break
-    except OSError:
-        pass
+    except (OSError, EOFError, RuntimeError) as error:
+        if not session._closed and not isinstance(error, (OSError, EOFError)):
+            LOGGER.warning("Could not connect to terminal %s: %s", session.session_id, error)
+        send(WS_OP_CLOSE, b"")
     finally:
         dead[0] = True
-        session.unsubscribe_oob(on_oob)
-        output_thread.join(timeout=2.0)
+        if output_thread is not None:
+            output_thread.join(timeout=CONNECTION_READ_TIMEOUT + PROCESS_EXIT_TIMEOUT)
+        if connection is not None:
+            connection.close()
 
 
 def ws_handle_connection(conn, service, data=None):

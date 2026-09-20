@@ -7,6 +7,7 @@ import json
 import os
 import socket
 import signal
+import shlex
 import ssl
 import struct
 import subprocess
@@ -44,6 +45,28 @@ TMUX_TMPDIR_ENV = "TMUX_TMPDIR"
 UTF8_READ_SIZES = (1, 2, 3)
 UTF8_TEXT = "é⠈漢😀"
 OUTPUT_END_MARKER = "__OUTPUT_END__"
+SCREEN_TITLE = "Tekla review é⠈漢😀"
+SCREEN_UPDATE = "continued"
+SCREEN_DRAWING = "\x1b[2J\x1b[H" + SCREEN_TITLE + "\x1b[4;7Hready"
+SCREEN_REPAINT = "\x1b[5;1H."
+SCREEN_REPAINT_COUNT = 400
+SCREEN_BUFFER_CHARS = 1024
+SCREEN_CURSOR_POSITION = "\x1b[4;12H"
+SCREEN_RESET = "\x18\x1bc"
+SCREEN_POLL_TIMEOUT = 0.2
+RECONNECT_CURSORS = (0, 1, 10**9)
+SCREEN_SUFFIX_CHARS = 16
+SCREEN_RENDER_STATE = "#{cursor_x} #{cursor_y} #{cursor_flag} #{alternate_on}"
+QUEUED_REPAINT_COUNT = 150000
+QUEUED_DRAWING = "\x1b[2J\x1b[Hready" + "\x1b[0m" * QUEUED_REPAINT_COUNT + SCREEN_UPDATE
+STREAM_TEXT = UTF8_TEXT + "\\033\\path\r\n%output %0 literal\r\n\x1b[31mred\x1b[0m"
+STREAM_BYTE_INTERVAL = 0.01
+STREAM_READY = "__STREAM_READY__"
+STREAM_SCREEN_READY = "\x1b[2J\x1b[H" + STREAM_READY
+PARTIAL_COLOR_SEQUENCE = "\x1b[31"
+COLOR_CONTINUATION = "mred\x1b[0m"
+STREAM_LINE_COUNT = 12
+STREAM_LINE_INTERVAL = 0.02
 
 
 def get_free_port():
@@ -447,7 +470,7 @@ def ws_connect(host, port, path):
     sock.sendall(request.encode())
     response = b""
     while b"\r\n\r\n" not in response:
-        chunk = sock.recv(4096)
+        chunk = sock.recv(1)
         if not chunk:
             raise RuntimeError("Connection closed during handshake")
         response += chunk
@@ -627,6 +650,241 @@ def test_websocket_restores_pane_modes_on_connect(terminal_server):
     assert b"\x1b[?1049h" in oob
     assert b"\x1b[?1003h" in oob
     assert b"\x1b[?1006h" in oob
+
+
+def start_terminal_program(server, port, tmp_path, code):
+    """Run a terminal program in its own session with input echo disabled."""
+    base_url = f"http://{server.host}:{port}"
+    _, session_payload = http_request(f"{base_url}/api/sessions", method="POST")
+    session_id = session_payload["session_id"]
+    session = server._get_session(session_id)
+    program = tmp_path / f"screen_{session_id}.py"
+    program.write_text(code, encoding="utf-8")
+    http_request(
+        f"{base_url}/api/sessions/{session_id}/input", method="POST",
+        payload={"data": f"stty -echo; exec {shlex.quote(sys.executable)} {shlex.quote(str(program))}\n"},
+    )
+    return session
+
+
+def start_screen_program(server, port, tmp_path, drawing, update=SCREEN_UPDATE,
+                         wait_for_output=True):
+    """Draw a screen in a real pane and wait until the output reader receives it."""
+    session = start_terminal_program(server, port, tmp_path,
+        "# ABOUTME: Draws a terminal screen and waits for input.\n"
+        "# ABOUTME: Writes a continuation at the current cursor when input arrives.\n"
+        "import sys\n"
+        f"SCREEN = {drawing!r}\n"
+        f"UPDATE = {update!r}\n"
+        "sys.stdout.write(SCREEN)\n"
+        "sys.stdout.flush()\n"
+        "sys.stdin.readline()\n"
+        "sys.stdout.write(UPDATE)\n"
+        "sys.stdout.flush()\n"
+        "sys.stdin.readline()\n",
+    )
+    if not wait_for_output:
+        return session
+    deadline = time.monotonic() + OUTPUT_TIMEOUT_SECONDS
+    suffix = drawing[-SCREEN_SUFFIX_CHARS:]
+    while (not session.full_buffer().endswith(suffix)
+           and time.monotonic() < deadline):
+        time.sleep(POLL_INTERVAL_SECONDS)
+    assert session.full_buffer().endswith(suffix)
+    return session
+
+
+def capture_screen(session):
+    """Read the visible pane and cursor state from tmux."""
+    return subprocess.run(
+        ["tmux", "capture-pane", "-t", session._tmux_name, "-p", "-e",
+         ";", "display-message", "-t", session._tmux_name, "-p", SCREEN_RENDER_STATE],
+        capture_output=True, text=True, check=True,
+    ).stdout
+
+
+def test_websocket_stream_preserves_split_characters_and_escape_sequences(terminal_server, tmp_path):
+    """Live output retains Unicode, literal backslashes, and terminal controls."""
+    server, port = terminal_server
+    session = start_terminal_program(server, port, tmp_path,
+        "# ABOUTME: Emits terminal text one byte at a time after input.\n"
+        "# ABOUTME: Exercises stream boundaries inside Unicode and escape sequences.\n"
+        "import sys\n"
+        "import time\n"
+        f"READY = {STREAM_READY!r}\n"
+        f"OUTPUT = {STREAM_TEXT.encode('utf-8')!r}\n"
+        f"INTERVAL = {STREAM_BYTE_INTERVAL!r}\n"
+        "sys.stdout.write(READY)\n"
+        "sys.stdout.flush()\n"
+        "sys.stdin.readline()\n"
+        "for byte in OUTPUT:\n"
+        "    sys.stdout.buffer.write(bytes([byte]))\n"
+        "    sys.stdout.flush()\n"
+        "    time.sleep(INTERVAL)\n"
+        "sys.stdin.readline()\n",
+    )
+    read_until(f"http://{server.host}:{port}", session.session_id, STREAM_READY)
+    sock = ws_connect(server.host, port, f"/api/sessions/{session.session_id}/ws")
+    try:
+        ws_recv_frames(sock, timeout=SCREEN_POLL_TIMEOUT)
+        ws_send_text(sock, "\n")
+        output = ws_recv_text(sock, timeout=OUTPUT_TIMEOUT_SECONDS)
+        assert output == STREAM_TEXT.replace("\r\n", "\r\r\n")
+    finally:
+        sock.close()
+
+
+def test_websocket_disconnect_detaches_terminal_client(terminal_server, tmp_path):
+    """Closing a browser releases its output connection and leaves the pane alive."""
+    server, port = terminal_server
+    session = start_screen_program(server, port, tmp_path, SCREEN_DRAWING)
+    sock = ws_connect(server.host, port, f"/api/sessions/{session.session_id}/ws")
+    try:
+        ws_recv_frames(sock, timeout=SCREEN_POLL_TIMEOUT)
+        clients = subprocess.check_output(
+            ["tmux", "list-clients", "-t", session._tmux_name, "-F", "#{client_pid}"],
+            text=True,
+        ).splitlines()
+        assert len(clients) == 1
+        size = subprocess.check_output(
+            ["tmux", "display-message", "-t", session._tmux_name, "-p", "#{pane_width} #{pane_height}"],
+            text=True,
+        ).strip()
+        assert size == f"{session.cols} {session.rows}"
+    finally:
+        sock.close()
+    deadline = time.monotonic() + OUTPUT_TIMEOUT_SECONDS
+    while clients and time.monotonic() < deadline:
+        clients = subprocess.check_output(
+            ["tmux", "list-clients", "-t", session._tmux_name, "-F", "#{client_pid}"],
+            text=True,
+        ).splitlines()
+        time.sleep(POLL_INTERVAL_SECONDS)
+    assert clients == []
+    assert "ready" in capture_screen(session)
+
+
+def test_websocket_restores_unfinished_escape_sequence(terminal_server, tmp_path):
+    """A drawing command split across connection time completes in the browser."""
+    server, port = terminal_server
+    session = start_screen_program(server, port, tmp_path,
+                                   SCREEN_DRAWING + PARTIAL_COLOR_SEQUENCE,
+                                   update=COLOR_CONTINUATION)
+    sock = ws_connect(server.host, port, f"/api/sessions/{session.session_id}/ws")
+    try:
+        frames = ws_recv_frames(sock, timeout=SCREEN_POLL_TIMEOUT)
+        snapshot = "".join(payload[1:].decode("utf-8") for opcode, payload in frames
+                           if opcode == 0x2 and payload[:1] == bytes([WS_BIN_OOB]))
+        assert snapshot.endswith(PARTIAL_COLOR_SEQUENCE)
+        ws_send_text(sock, "\n")
+        output = ws_recv_text(sock, timeout=SCREEN_POLL_TIMEOUT)
+        assert output == COLOR_CONTINUATION
+        rendered = start_screen_program(server, port, tmp_path, snapshot + output)
+        assert capture_screen(rendered) == capture_screen(session)
+    finally:
+        sock.close()
+
+
+def test_websocket_snapshot_joins_output_while_the_pane_is_writing(terminal_server, tmp_path):
+    """Capturing during a running program neither repeats nor skips screen text."""
+    server, port = terminal_server
+    session = start_terminal_program(server, port, tmp_path,
+        "# ABOUTME: Writes numbered lines while a terminal client connects.\n"
+        "# ABOUTME: Leaves the completed screen available for comparison.\n"
+        "import sys\n"
+        "import time\n"
+        f"READY = {STREAM_SCREEN_READY!r}\n"
+        f"COUNT = {STREAM_LINE_COUNT!r}\n"
+        f"INTERVAL = {STREAM_LINE_INTERVAL!r}\n"
+        f"DONE = {OUTPUT_END_MARKER!r}\n"
+        "print(READY, flush=True)\n"
+        "for index in range(COUNT):\n"
+        "    print(index, flush=True)\n"
+        "    time.sleep(INTERVAL)\n"
+        "sys.stdout.write(DONE)\n"
+        "sys.stdout.flush()\n"
+        "sys.stdin.readline()\n",
+    )
+    read_until(f"http://{server.host}:{port}", session.session_id, STREAM_READY)
+    sock = ws_connect(server.host, port, f"/api/sessions/{session.session_id}/ws")
+    try:
+        frames = ws_recv_frames(sock, timeout=OUTPUT_TIMEOUT_SECONDS)
+        screen = "".join((payload[1:] if opcode == 0x2 else payload).decode("utf-8")
+                         for opcode, payload in frames
+                         if opcode == 0x1 or (opcode == 0x2 and payload[:1] == bytes([WS_BIN_OOB])))
+        assert OUTPUT_END_MARKER in screen
+        rendered = start_screen_program(server, port, tmp_path, screen)
+        assert capture_screen(rendered) == capture_screen(session)
+    finally:
+        sock.close()
+
+
+def test_websocket_snapshot_does_not_repeat_queued_output(
+        terminal_server, monkeypatch, tmp_path):
+    """A snapshot excludes queued drawing commands already reflected in its text."""
+    monkeypatch.setattr("web_terminal.server.DEFAULT_READ_SIZE", 1)
+    server, port = terminal_server
+    session = start_screen_program(server, port, tmp_path, QUEUED_DRAWING,
+                                   wait_for_output=False)
+    deadline = time.monotonic() + OUTPUT_TIMEOUT_SECONDS
+    while SCREEN_UPDATE not in capture_screen(session) and time.monotonic() < deadline:
+        time.sleep(POLL_INTERVAL_SECONDS)
+    assert SCREEN_UPDATE in capture_screen(session)
+    assert SCREEN_UPDATE not in session.full_buffer()
+
+    sock = ws_connect(server.host, port, f"/api/sessions/{session.session_id}/ws?cursor=0")
+    try:
+        frames = ws_recv_frames(sock, timeout=OUTPUT_TIMEOUT_SECONDS)
+    finally:
+        sock.close()
+    snapshot = "".join(payload[1:].decode("utf-8") for opcode, payload in frames
+                       if opcode == 0x2 and payload[:1] == bytes([WS_BIN_OOB]))
+    output = "".join(payload.decode("utf-8") for opcode, payload in frames if opcode == 0x1)
+    assert SCREEN_UPDATE in snapshot
+    assert len(output) == 0
+
+
+@pytest.mark.parametrize("cursor_hint", RECONNECT_CURSORS)
+@pytest.mark.parametrize("alternate_screen", (False, True))
+def test_websocket_restores_screen_after_output_is_trimmed(
+        terminal_server, monkeypatch, tmp_path, cursor_hint, alternate_screen):
+    """Reconnections restore pane text and continue at the pane's cursor."""
+    monkeypatch.setattr("web_terminal.server.MAX_BUFFER_CHARS", SCREEN_BUFFER_CHARS)
+    monkeypatch.setattr("web_terminal.server.BUFFER_TRIM_SLACK_CHARS", 0)
+    server, port = terminal_server
+    modes = "\x1b[?1049h\x1b[?1003h\x1b[?1006h" if alternate_screen else ""
+    drawing = (modes + SCREEN_DRAWING + SCREEN_REPAINT * SCREEN_REPAINT_COUNT
+               + SCREEN_CURSOR_POSITION)
+    session = start_screen_program(server, port, tmp_path, drawing)
+    session_id = session.session_id
+    assert session.full_buffer().endswith(SCREEN_CURSOR_POSITION)
+    assert SCREEN_TITLE not in session.full_buffer()
+    end_cursor = session.end_cursor()
+
+    sock = ws_connect(server.host, port, f"/api/sessions/{session_id}/ws?cursor={cursor_hint}")
+    try:
+        frames = ws_recv_frames(sock, timeout=SCREEN_POLL_TIMEOUT)
+        snapshot = "".join(payload[1:].decode("utf-8") for opcode, payload in frames
+                           if opcode == 0x2 and payload[:1] == bytes([WS_BIN_OOB]))
+        metadata = [json.loads(payload[1:]) for opcode, payload in frames
+                    if opcode == 0x2 and payload[:1] == b"\x00"]
+        assert SCREEN_TITLE in snapshot
+        assert snapshot.startswith(SCREEN_RESET)
+        assert SCREEN_CURSOR_POSITION in snapshot
+        assert metadata == [{"cursor": end_cursor}]
+        assert not any(opcode == 0x1 for opcode, _ in frames)
+        if alternate_screen:
+            assert modes in snapshot
+
+        rendered = start_screen_program(server, port, tmp_path, snapshot)
+        assert capture_screen(rendered) == capture_screen(session)
+        ws_send_text(sock, "\n")
+        update = ws_recv_text(sock, timeout=SCREEN_POLL_TIMEOUT)
+        assert update == SCREEN_UPDATE
+        continued = start_screen_program(server, port, tmp_path, snapshot + update)
+        assert capture_screen(continued) == capture_screen(session)
+    finally:
+        sock.close()
 
 
 def test_client_html_uses_websocket(terminal_server):

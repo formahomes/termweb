@@ -103,6 +103,8 @@ TMUX_BIN = (
     or "tmux"
 )
 DEFAULT_STATIC_DIR = Path(__file__).resolve().parent / "static"
+HTML_CONTENT_TYPE = "text/html; charset=utf-8"
+JAVASCRIPT_CONTENT_TYPE = "text/javascript; charset=utf-8"
 LOGGER = logging.getLogger(__name__)
 
 
@@ -1521,10 +1523,13 @@ class TerminalRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/":
-            self._send_static_html("terminal.html")
+            self._send_static("terminal.html")
             return
         if parsed.path == "/dashboard":
-            self._send_static_html("dashboard.html")
+            self._send_static("dashboard.html")
+            return
+        if parsed.path == "/terminal-touch.js":
+            self._send_static("terminal-touch.js", JAVASCRIPT_CONTENT_TYPE)
             return
         if parsed.path == "/api/sessions":
             self._send_json(self.service.list_sessions())
@@ -1694,24 +1699,24 @@ class TerminalRequestHandler(BaseHTTPRequestHandler):
             return {}
         return json.loads(self.rfile.read(length).decode("utf-8"))
 
-    def _send_html(self, body: str) -> None:
+    def _send_text(self, body: str, content_type: str) -> None:
         encoded = body.encode("utf-8")
         self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(encoded)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(encoded)
 
-    def _send_static_html(self, name: str) -> None:
+    def _send_static(self, name: str, content_type: str = HTML_CONTENT_TYPE) -> None:
         path = self.service.static_dir / name
         try:
             body = path.read_text(encoding="utf-8")
         except FileNotFoundError:
             self._send_error(HTTPStatus.NOT_FOUND, f"Static file not found: {name}")
             return
-        self._send_html(body)
+        self._send_text(body, content_type)
 
     def _send_json(self, payload: Dict[str, object], status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(payload).encode("utf-8")

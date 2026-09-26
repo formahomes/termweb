@@ -7,7 +7,7 @@ const [BASE_URL, SESSION_ID] = process.argv.slice(2);
 const BROWSER = process.env.TERMWEB_BROWSER || "chromium";
 const VIEWPORT = { width: 390, height: 844 };
 const SETTLE_MS = 100;
-const LINE_COUNT = 200;
+const BROWSER_TIMEOUT_MS = 10000;
 const SWIPE_LINES = 6;
 const MODES = [
   { name: "alternate", sequence: "\x1b[?1049h", up: "\x1b[A", down: "\x1b[B" },
@@ -39,12 +39,15 @@ async function swipe(page, start, delta, steps = 1) {
 }
 
 async function output(page, sequence = "") {
-  await page.evaluate(async ({ sequence, count }) => {
-    terminal.reset();
-    await new Promise(resolve => terminal.write(sequence + Array.from(
-      { length: count }, (_, index) => "line " + index
-    ).join("\r\n"), resolve));
-  }, { sequence, count: LINE_COUNT });
+  const mode = sequence ? MODES.findIndex(item => item.sequence === sequence) + 2 : 1;
+  const response = await page.request.post(BASE_URL + "/api/sessions/" + SESSION_ID + "/input", {
+    data: { data: String.fromCharCode(mode) }
+  });
+  assert(response.ok());
+  await page.waitForFunction(marker => {
+    const buffer = terminal.buffer.active;
+    return buffer.getLine(buffer.baseY + buffer.cursorY).translateToString().includes(marker);
+  }, "__SCROLL_READY_" + mode + "__");
   await page.waitForTimeout(SETTLE_MS);
 }
 
@@ -54,6 +57,7 @@ async function main() {
   try {
     for (const path of ["/", "/dashboard"]) {
       const page = await browser.newPage({ viewport: VIEWPORT, isMobile: true, hasTouch: true });
+      page.setDefaultTimeout(BROWSER_TIMEOUT_MS);
       const errors = [];
       page.on("pageerror", error => errors.push(error.message));
       page.on("console", message => {
@@ -64,12 +68,7 @@ async function main() {
         await page.evaluate(sessionId => connectToSession(sessionId), SESSION_ID);
       }
       await page.waitForFunction(() => terminal && ws && ws.readyState === WebSocket.OPEN);
-      await page.waitForFunction(() => {
-        for (let row = 0; row < terminal.buffer.active.length; row++) {
-          if (terminal.buffer.active.getLine(row).translateToString().includes("__TOUCH_INPUT_READY__")) return true;
-        }
-        return false;
-      });
+      await output(page);
       await page.evaluate(() => {
         window.touchInput = [];
         terminal.onData(data => window.touchInput.push(data));
@@ -80,7 +79,6 @@ async function main() {
       const distance = rowHeight * (SWIPE_LINES + 0.25);
       const received = () => page.evaluate(() => window.touchInput.splice(0).join(""));
 
-      await output(page);
       const before = await page.evaluate(() => terminal.buffer.active.viewportY);
       await swipe(page, start, distance);
       assert.equal(await page.evaluate(() => terminal.buffer.active.viewportY), before - SWIPE_LINES,

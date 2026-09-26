@@ -1,3 +1,5 @@
+<!-- ABOUTME: Presents terminal sessions, settings, and notifications in a dashboard. -->
+<!-- ABOUTME: Connects the selected session to a terminal with keyboard and touch input. -->
 <!DOCTYPE html>
 <html lang="en">
   <head>
@@ -473,6 +475,7 @@
     <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-canvas@0.7.0/lib/addon-canvas.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-image@0.8.0/lib/addon-image.min.js"></script>
+    <script src="/terminal-touch.js"></script>
     <script>
       const sessionListNode = document.getElementById("session-list");
       const terminalContainerNode = document.getElementById("terminal-container");
@@ -782,6 +785,7 @@
             terminal.loadAddon(fitAddon);
           }
           terminal.open(terminalNode);
+          enableTouchScrolling(terminal);
           if (window.CanvasAddon && typeof window.CanvasAddon.CanvasAddon === "function") {
             try {
               terminal.loadAddon(new CanvasAddon.CanvasAddon());

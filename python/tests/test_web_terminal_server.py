@@ -70,6 +70,9 @@ STREAM_LINE_INTERVAL = 0.02
 BROWSER_TEST_SCRIPT = os.path.join(os.path.dirname(__file__), "terminal_touch.cjs")
 BROWSER_TEST_TIMEOUT = 120
 TOUCH_INPUT_READY = "__TOUCH_INPUT_READY__"
+TOUCH_OUTPUT_LINES = 200
+TOUCH_MODES = ("", "\x1b[?1049h", "\x1b[?1049h\x1b[?1h",
+               "\x1b[?1049h\x1b[?1000h\x1b[?1006h", "\x1b[?1002h\x1b[?1006h")
 
 
 def get_free_port():
@@ -924,11 +927,19 @@ def test_terminal_touch_scrolling(terminal_server, tmp_path):
         "import os, tty\n"
         f"INPUT_PATH = {str(input_path)!r}\n"
         f"READY = {TOUCH_INPUT_READY!r}\n"
+        f"MODES = {TOUCH_MODES!r}\n"
+        f"LINE_COUNT = {TOUCH_OUTPUT_LINES!r}\n"
         "tty.setraw(0)\n"
         "with open(INPUT_PATH, 'wb', buffering=0) as stream:\n"
         "    print(READY, flush=True)\n"
         "    while True:\n"
-        "        stream.write(os.read(0, 4096))\n")
+        "        data = os.read(0, 4096)\n"
+        "        if len(data) == 1 and 1 <= data[0] <= len(MODES):\n"
+        "            mode = data[0]\n"
+        "            text = '\\r\\n'.join('line ' + str(i) for i in range(LINE_COUNT))\n"
+        "            os.write(1, ('\\x1bc' + MODES[mode - 1] + text + '\\r\\n__SCROLL_READY_' + str(mode) + '__').encode())\n"
+        "        else:\n"
+        "            stream.write(data)\n")
     deadline = time.monotonic() + OUTPUT_TIMEOUT_SECONDS
     while TOUCH_INPUT_READY not in session.full_buffer() and time.monotonic() < deadline:
         time.sleep(POLL_INTERVAL_SECONDS)

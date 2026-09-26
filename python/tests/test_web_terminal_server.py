@@ -946,7 +946,8 @@ def test_terminal_touch_scrolling(terminal_server, tmp_path):
     assert TOUCH_INPUT_READY in session.full_buffer()
 
     result = subprocess.run(
-        ["node", BROWSER_TEST_SCRIPT, f"http://{server.host}:{port}", session.session_id],
+        ["node", BROWSER_TEST_SCRIPT, f"http://{server.host}:{port}", session.session_id,
+         str(input_path)],
         capture_output=True, text=True, timeout=BROWSER_TEST_TIMEOUT,
     )
     assert result.returncode == 0, result.stdout + result.stderr
@@ -956,6 +957,39 @@ def test_terminal_touch_scrolling(terminal_server, tmp_path):
     while input_path.read_bytes() != expected and time.monotonic() < deadline:
         time.sleep(POLL_INTERVAL_SECONDS)
     assert input_path.read_bytes() == expected
+
+
+@pytest.mark.parametrize("processes, expected", [
+    ("42 42 /opt/homebrew/bin/codex\n", True),
+    ("42 42 node\n42 42 /opt/homebrew/lib/codex\n", True),
+    ("42 80 /opt/homebrew/bin/codex\n80 80 /bin/less\n", False),
+    ("42 42 /bin/sh\n", False),
+    ("42 42 /opt/homebrew/bin/codex-helper\n", False),
+    ("", False),
+])
+def test_foreground_program_mouse_scroll_support(processes, expected):
+    from web_terminal.server import foreground_accepts_mouse_scroll
+
+    assert foreground_accepts_mouse_scroll(processes) is expected
+
+
+def test_scroll_requests_page_unknown_programs_once_per_gesture(terminal_server, tmp_path):
+    from web_terminal.server import TerminalScroll
+
+    server, port = terminal_server
+    session = start_screen_program(server, port, tmp_path, SCREEN_TITLE)
+    scroll = TerminalScroll(session)
+
+    def request(lines, start=False):
+        return json.dumps({"type": "scroll", "lines": lines, "column": 4,
+                           "row": 3, "start": start}).encode()
+
+    assert scroll.input(request(-1)) == ""
+    assert scroll.input(request(-1, start=True)) == "\x1b[5~"
+    assert scroll.input(request(-3)) == ""
+    assert scroll.input(request(1, start=True)) == "\x1b[6~"
+    for invalid in (b"invalid", b"[]", b"{}", request(0), request(1000000)):
+        assert scroll.input(invalid) == ""
 
 
 def test_session_backed_by_tmux(terminal_server):

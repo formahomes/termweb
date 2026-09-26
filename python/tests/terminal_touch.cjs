@@ -1,9 +1,10 @@
 // ABOUTME: Exercises touch scrolling in both terminal pages using real xterm instances.
 // ABOUTME: Checks gesture handling and records input sent over the session WebSocket.
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
 const { chromium, webkit } = require("playwright");
 
-const [BASE_URL, SESSION_ID] = process.argv.slice(2);
+const [BASE_URL, SESSION_ID, INPUT_PATH] = process.argv.slice(2);
 const BROWSER = process.env.TERMWEB_BROWSER || "chromium";
 const VIEWPORT = { width: 390, height: 844 };
 const SETTLE_MS = 100;
@@ -54,11 +55,16 @@ async function output(page, sequence = "") {
 async function main() {
   const browser = await ({ chromium, webkit })[BROWSER].launch();
   let sent = "";
+  let inputCursor = 0;
   try {
     for (const path of ["/", "/dashboard"]) {
       const page = await browser.newPage({ viewport: VIEWPORT, isMobile: true, hasTouch: true });
       page.setDefaultTimeout(BROWSER_TIMEOUT_MS);
       const errors = [];
+      const scrollRequests = [];
+      page.on("websocket", socket => socket.on("framesent", event => {
+        if (Buffer.isBuffer(event.payload)) scrollRequests.push(JSON.parse(event.payload.toString()));
+      }));
       page.on("pageerror", error => errors.push(error.message));
       page.on("console", message => {
         if (["warning", "error"].includes(message.type())) errors.push(message.text());
@@ -69,15 +75,16 @@ async function main() {
       }
       await page.waitForFunction(() => terminal && ws && ws.readyState === WebSocket.OPEN);
       await output(page);
-      await page.evaluate(() => {
-        window.touchInput = [];
-        terminal.onData(data => window.touchInput.push(data));
-      });
       const bounds = await page.locator(".xterm-screen").boundingBox();
       const rowHeight = bounds.height / await page.evaluate(() => terminal.rows);
       const start = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
       const distance = rowHeight * (SWIPE_LINES + 0.25);
-      const received = () => page.evaluate(() => window.touchInput.splice(0).join(""));
+      const received = () => {
+        const input = fs.readFileSync(INPUT_PATH, "utf8");
+        const data = input.slice(inputCursor);
+        inputCursor = input.length;
+        return data;
+      };
 
       const before = await page.evaluate(() => terminal.buffer.active.viewportY);
       await swipe(page, start, distance);
@@ -105,10 +112,15 @@ async function main() {
       }
 
       await output(page, MODES[0].sequence);
+      scrollRequests.length = 0;
       await swipe(page, start, distance, 30);
       const partial = await received();
       assert.equal(partial, MODES[0].up, "one swipe sends one page key across multiple movements");
       sent += partial;
+      assert(scrollRequests.length > 1, "finger movement must produce incremental scroll requests");
+      assert.equal(scrollRequests.reduce((total, request) => total + request.lines, 0), -SWIPE_LINES);
+      assert.equal(scrollRequests.filter(request => request.start).length, 1);
+      assert(scrollRequests.every(request => request.type === "scroll"));
 
       await touch(page, "touchstart", [start]);
       await touch(page, "touchend", []);

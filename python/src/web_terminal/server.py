@@ -105,7 +105,24 @@ TMUX_BIN = (
 DEFAULT_STATIC_DIR = Path(__file__).resolve().parent / "static"
 HTML_CONTENT_TYPE = "text/html; charset=utf-8"
 JAVASCRIPT_CONTENT_TYPE = "text/javascript; charset=utf-8"
+MOUSE_SCROLL_PROGRAMS = frozenset({"codex"})
+PROGRAM_QUERY_TIMEOUT = 1.0
+MAX_SCROLL_LINES = 100
+SCROLL_PAGE_UP = "\x1b[5~"
+SCROLL_PAGE_DOWN = "\x1b[6~"
+SCROLL_MOUSE_UP = 64
+SCROLL_MOUSE_DOWN = 65
 LOGGER = logging.getLogger(__name__)
+
+
+def foreground_accepts_mouse_scroll(processes: str) -> bool:
+    """Recognize foreground programs that accept wheel input without enabling mouse capture."""
+    for line in processes.splitlines():
+        fields = line.split(None, 2)
+        if (len(fields) == 3 and fields[0] == fields[1]
+                and Path(fields[2]).name in MOUSE_SCROLL_PROGRAMS):
+            return True
+    return False
 
 
 def list_directories(prefix: str) -> Dict[str, list]:
@@ -666,6 +683,23 @@ class TerminalSession:
             return result.stdout.strip()
         return self.cwd
 
+    def accepts_mouse_scroll(self) -> bool:
+        """Check the pane's foreground process group for wheel scrolling support."""
+        try:
+            pane = subprocess.run(
+                [TMUX_BIN, "display-message", "-t", self._tmux_name, "-p", "#{pane_tty}"],
+                capture_output=True, text=True, timeout=PROGRAM_QUERY_TIMEOUT,
+            )
+            if pane.returncode != 0 or not pane.stdout.strip():
+                return False
+            processes = subprocess.run(
+                ["ps", "-t", pane.stdout.strip(), "-o", "pgid=,tpgid=,comm="],
+                capture_output=True, text=True, timeout=PROGRAM_QUERY_TIMEOUT,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return processes.returncode == 0 and foreground_accepts_mouse_scroll(processes.stdout)
+
     def info(self) -> Dict[str, object]:
         with self._lock:
             closed = self._closed
@@ -777,6 +811,42 @@ class TerminalSession:
                 self._output_ready.notify_all()
 
 
+class TerminalScroll:
+    """Translate swipe movement into input understood by the foreground program."""
+
+    def __init__(self, session: TerminalSession):
+        self._session = session
+        self._mouse = None
+        self._page_sent = False
+
+    def input(self, payload: bytes) -> str:
+        try:
+            request = json.loads(payload)
+        except (ValueError, UnicodeError):
+            return ""
+        if not isinstance(request, dict) or request.get("type") != "scroll":
+            return ""
+        lines, column, row = (request.get(key) for key in ("lines", "column", "row"))
+        if (any(type(value) is not int for value in (lines, column, row))
+                or not 0 < abs(lines) <= MAX_SCROLL_LINES or column < 1 or row < 1
+                or type(request.get("start")) is not bool):
+            return ""
+        if request["start"]:
+            self._mouse = self._session.accepts_mouse_scroll()
+            self._page_sent = False
+        if self._mouse is None:
+            return ""
+        if self._mouse:
+            button = SCROLL_MOUSE_UP if lines < 0 else SCROLL_MOUSE_DOWN
+            column = min(column, self._session.cols)
+            row = min(row, self._session.rows)
+            return f"\x1b[<{button};{column};{row}M" * abs(lines)
+        if self._page_sent:
+            return ""
+        self._page_sent = True
+        return SCROLL_PAGE_UP if lines < 0 else SCROLL_PAGE_DOWN
+
+
 WS_MAGIC = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 WS_OP_TEXT = 0x1
 WS_OP_BINARY = 0x2
@@ -854,6 +924,7 @@ WS_BIN_OOB = 0x01   # typed binary frame: out-of-band terminal data (write, don'
 def ws_relay(sock, reader, session: "TerminalSession", cursor_hint: Optional[int] = None) -> None:
     """Relay data between a WebSocket and a PTY session until either side closes."""
     cursor = session.end_cursor()
+    scroll = TerminalScroll(session)
 
     send_lock = threading.Lock()
     dead = [False]
@@ -903,6 +974,10 @@ def ws_relay(sock, reader, session: "TerminalSession", cursor_hint: Optional[int
             opcode, payload = frame
             if opcode == WS_OP_TEXT:
                 session.write(payload.decode("utf-8", errors="replace"))
+            elif opcode == WS_OP_BINARY:
+                data = scroll.input(payload)
+                if data:
+                    session.write(data)
             elif opcode == WS_OP_PING:
                 send(WS_OP_PONG, payload)
             elif opcode == WS_OP_CLOSE:

@@ -367,7 +367,7 @@
             terminal.loadAddon(fitAddon);
           }
           terminal.open(terminalNode);
-          enableTouchScrolling(terminal);
+          enableTouchScrolling(terminal, () => ws);
           if (window.CanvasAddon && typeof window.CanvasAddon.CanvasAddon === "function") {
             try {
               terminal.loadAddon(new CanvasAddon.CanvasAddon());

@@ -16,6 +16,14 @@ The connection decodes those bytes and uses an incremental UTF-8 decoder so a
 character can span multiple notifications. The output-pipe reader also uses an
 incremental decoder.
 
+Keyboard input uses WebSocket text frames. Swipes in full-screen programs without
+mouse capture use binary JSON frames containing `type: "scroll"`, signed `lines`,
+one-based `column` and `row`, and a `start` flag for the first movement of a gesture.
+The connection checks the pane's foreground process group at each gesture start.
+Codex accepts SGR wheel reports even with mouse capture disabled, so its transcript
+receives incremental wheel input. Unrecognized programs receive a single page key
+per gesture. Each browser connection keeps its own gesture state.
+
 The output pipe retains a bounded stream for the HTTP output and history routes.
 Browser reconnects use a fresh snapshot instead of a cursor into that stream.
 Snapshots restore text and text attributes; previously emitted inline images are

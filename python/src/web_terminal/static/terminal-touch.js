@@ -3,10 +3,8 @@
 const TOUCH_SCROLL_THRESHOLD = 8;
 const TOUCH_SCROLL_BUFFER = "alternate";
 const TOUCH_SCROLL_MOUSE_DISABLED = "none";
-const TOUCH_SCROLL_PAGE_UP = "\x1b[5~";
-const TOUCH_SCROLL_PAGE_DOWN = "\x1b[6~";
 
-function enableTouchScrolling(terminal, threshold = TOUCH_SCROLL_THRESHOLD) {
+function enableTouchScrolling(terminal, getSocket, threshold = TOUCH_SCROLL_THRESHOLD) {
   const element = terminal.element;
   const screen = element.querySelector(".xterm-screen");
   let gesture = null;
@@ -26,7 +24,7 @@ function enableTouchScrolling(terminal, threshold = TOUCH_SCROLL_THRESHOLD) {
       y: touch.clientY,
       lastY: touch.clientY,
       remainder: 0,
-      pageSent: false,
+      scrollStarted: false,
       scrolling: false
     };
   }, { capture: true, passive: true });
@@ -55,21 +53,30 @@ function enableTouchScrolling(terminal, threshold = TOUCH_SCROLL_THRESHOLD) {
 
     if (event.cancelable) event.preventDefault();
     event.stopImmediatePropagation();
+    gesture.remainder += gesture.lastY - touch.clientY;
+    gesture.lastY = touch.clientY;
+    const bounds = screen.getBoundingClientRect();
+    const rowHeight = bounds.height / terminal.rows;
+    if (rowHeight <= 0) return;
+    const lines = Math.trunc(gesture.remainder / rowHeight);
+    if (lines === 0) return;
+    gesture.remainder -= lines * rowHeight;
     if (terminal.modes.mouseTrackingMode === TOUCH_SCROLL_MOUSE_DISABLED) {
-      if (!gesture.pageSent) {
-        terminal.input(touch.clientY > gesture.y ? TOUCH_SCROLL_PAGE_UP : TOUCH_SCROLL_PAGE_DOWN, true);
-        gesture.pageSent = true;
+      const socket = getSocket();
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        const column = Math.max(1, Math.min(terminal.cols,
+          Math.floor((gesture.x - bounds.left) / (bounds.width / terminal.cols)) + 1));
+        const row = Math.max(1, Math.min(terminal.rows,
+          Math.floor((gesture.y - bounds.top) / rowHeight) + 1));
+        socket.send(new TextEncoder().encode(JSON.stringify({
+          type: "scroll", lines, column, row, start: !gesture.scrollStarted
+        })));
+        gesture.scrollStarted = true;
       }
       return;
     }
 
     // xterm's wheel handler encodes mouse scroll reports for the active program.
-    gesture.remainder += gesture.lastY - touch.clientY;
-    gesture.lastY = touch.clientY;
-    const rowHeight = screen.getBoundingClientRect().height / terminal.rows;
-    if (rowHeight <= 0) return;
-    const lines = Math.trunc(gesture.remainder / rowHeight);
-    gesture.remainder -= lines * rowHeight;
     for (let line = 0; line < Math.abs(lines); line++) {
       screen.dispatchEvent(new WheelEvent("wheel", {
         bubbles: true,

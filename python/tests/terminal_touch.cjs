@@ -9,6 +9,7 @@ const BROWSER = process.env.TERMWEB_BROWSER || "chromium";
 const VIEWPORT = { width: 390, height: 844 };
 const SETTLE_MS = 100;
 const BROWSER_TIMEOUT_MS = 10000;
+const INPUT_POLL_MS = 20;
 const SWIPE_LINES = 6;
 const MODES = [
   { name: "alternate", sequence: "\x1b[?1049h", up: "\x1b[5~", down: "\x1b[6~" },
@@ -79,8 +80,13 @@ async function main() {
       const rowHeight = bounds.height / await page.evaluate(() => terminal.rows);
       const start = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
       const distance = rowHeight * (SWIPE_LINES + 0.25);
-      const received = () => {
-        const input = fs.readFileSync(INPUT_PATH, "utf8");
+      const received = async (minimumLength = 0) => {
+        const deadline = Date.now() + BROWSER_TIMEOUT_MS;
+        let input = fs.readFileSync(INPUT_PATH, "utf8");
+        while (input.length - inputCursor < minimumLength && Date.now() < deadline) {
+          await page.waitForTimeout(INPUT_POLL_MS);
+          input = fs.readFileSync(INPUT_PATH, "utf8");
+        }
         const data = input.slice(inputCursor);
         inputCursor = input.length;
         return data;
@@ -96,7 +102,7 @@ async function main() {
         await output(page, mode.sequence);
         for (const direction of [1, -1]) {
           await swipe(page, start, distance * direction);
-          const data = await received();
+          const data = await received(1);
           assert.notEqual(data, "", path + " " + mode.name + " swipe must send scrolling input");
           if (mode.mouse) {
             const reports = data.match(/\x1b\[<(64|65);\d+;\d+M/g) || [];
@@ -114,7 +120,7 @@ async function main() {
       await output(page, MODES[0].sequence);
       scrollRequests.length = 0;
       await swipe(page, start, distance, 30);
-      const partial = await received();
+      const partial = await received(1);
       assert.equal(partial, MODES[0].up, "one swipe sends one page key across multiple movements");
       sent += partial;
       assert(scrollRequests.length > 1, "finger movement must produce incremental scroll requests");

@@ -43,9 +43,9 @@ The start script publishes the service under `com.termweb.web-terminal` on port 
 
 ## Notes
 
-- Swipes scroll ordinary terminal output directly. Full-screen programs with
-  mouse support receive line scrolling; other full-screen programs receive one
-  Page Up or Page Down per swipe. Codex uses those keys to scroll its transcript
-  while retaining the current draft.
+- Swipes scroll ordinary terminal output directly. Codex and full-screen programs
+  with mouse support receive incremental wheel scrolling as the finger moves.
+  Termweb checks the foreground program at the start of each swipe. Other
+  full-screen programs receive one Page Up or Page Down per swipe.
 - The launchd runtime copy is stored under `~/.termweb-runtime/`
 - Restarting the script replaces any existing `com.termweb.web-terminal` job

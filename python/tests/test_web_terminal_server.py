@@ -67,6 +67,9 @@ PARTIAL_COLOR_SEQUENCE = "\x1b[31"
 COLOR_CONTINUATION = "mred\x1b[0m"
 STREAM_LINE_COUNT = 12
 STREAM_LINE_INTERVAL = 0.02
+BROWSER_TEST_SCRIPT = os.path.join(os.path.dirname(__file__), "terminal_touch.cjs")
+BROWSER_TEST_TIMEOUT = 120
+TOUCH_INPUT_READY = "__TOUCH_INPUT_READY__"
 
 
 def get_free_port():
@@ -895,6 +898,53 @@ def test_client_html_uses_websocket(terminal_server):
     assert "function openWebSocket(" in body
     assert "socket.onmessage" in body
     assert "socket.onclose" in body
+
+
+def test_terminal_touch_script_is_served(terminal_server):
+    server, port = terminal_server
+    base_url = f"http://{server.host}:{port}"
+    for path in ("/", "/dashboard"):
+        _, body = http_request(base_url + path)
+        assert '<script src="/terminal-touch.js"></script>' in body
+    with urllib.request.urlopen(base_url + "/terminal-touch.js") as response:
+        assert response.headers.get_content_type() == "text/javascript"
+        assert response.headers["Cache-Control"] == "no-store"
+        assert response.read().decode("utf-8") == (
+            server.static_dir / "terminal-touch.js").read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(not os.environ.get("TERMWEB_BROWSER_TESTS"),
+                    reason="Set TERMWEB_BROWSER_TESTS=1 with Playwright on NODE_PATH")
+def test_terminal_touch_scrolling(terminal_server, tmp_path):
+    server, port = terminal_server
+    input_path = tmp_path / "touch-input.bin"
+    session = start_terminal_program(server, port, tmp_path,
+        "# ABOUTME: Receives terminal input through a real raw-mode PTY.\n"
+        "# ABOUTME: Records the bytes delivered by browser scrolling gestures.\n"
+        "import os, tty\n"
+        f"INPUT_PATH = {str(input_path)!r}\n"
+        f"READY = {TOUCH_INPUT_READY!r}\n"
+        "tty.setraw(0)\n"
+        "with open(INPUT_PATH, 'wb', buffering=0) as stream:\n"
+        "    print(READY, flush=True)\n"
+        "    while True:\n"
+        "        stream.write(os.read(0, 4096))\n")
+    deadline = time.monotonic() + OUTPUT_TIMEOUT_SECONDS
+    while TOUCH_INPUT_READY not in session.full_buffer() and time.monotonic() < deadline:
+        time.sleep(POLL_INTERVAL_SECONDS)
+    assert TOUCH_INPUT_READY in session.full_buffer()
+
+    result = subprocess.run(
+        ["node", BROWSER_TEST_SCRIPT, f"http://{server.host}:{port}", session.session_id],
+        capture_output=True, text=True, timeout=BROWSER_TEST_TIMEOUT,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stderr == ""
+    expected = json.loads(result.stdout).encode("utf-8")
+    deadline = time.monotonic() + OUTPUT_TIMEOUT_SECONDS
+    while input_path.read_bytes() != expected and time.monotonic() < deadline:
+        time.sleep(POLL_INTERVAL_SECONDS)
+    assert input_path.read_bytes() == expected
 
 
 def test_session_backed_by_tmux(terminal_server):

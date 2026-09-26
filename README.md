@@ -17,7 +17,7 @@ python3 -m pytest -q python/tests/test_project_files.py
 ```
 
 The touch scrolling browser test uses real xterm instances and an isolated tmux
-session. It checks both terminal pages, scroll direction, mouse reporting, cursor
+session. It checks both terminal pages, scroll direction, mouse reporting, page
 keys, ordinary scrollback, and gestures that should not send input. To include it:
 
 ```bash
@@ -43,5 +43,9 @@ The start script publishes the service under `com.termweb.web-terminal` on port 
 
 ## Notes
 
+- Swipes scroll ordinary terminal output directly. Full-screen programs with
+  mouse support receive line scrolling; other full-screen programs receive one
+  Page Up or Page Down per swipe. Codex uses those keys to scroll its transcript
+  while retaining the current draft.
 - The launchd runtime copy is stored under `~/.termweb-runtime/`
 - Restarting the script replaces any existing `com.termweb.web-terminal` job

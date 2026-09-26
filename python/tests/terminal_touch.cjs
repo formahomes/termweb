@@ -10,8 +10,8 @@ const SETTLE_MS = 100;
 const BROWSER_TIMEOUT_MS = 10000;
 const SWIPE_LINES = 6;
 const MODES = [
-  { name: "alternate", sequence: "\x1b[?1049h", up: "\x1b[A", down: "\x1b[B" },
-  { name: "application cursor", sequence: "\x1b[?1049h\x1b[?1h", up: "\x1bOA", down: "\x1bOB" },
+  { name: "alternate", sequence: "\x1b[?1049h", up: "\x1b[5~", down: "\x1b[6~" },
+  { name: "application cursor", sequence: "\x1b[?1049h\x1b[?1h", up: "\x1b[5~", down: "\x1b[6~" },
   { name: "alternate mouse", sequence: "\x1b[?1049h\x1b[?1000h\x1b[?1006h", mouse: true },
   { name: "normal mouse", sequence: "\x1b[?1002h\x1b[?1006h", mouse: true }
 ];
@@ -97,7 +97,8 @@ async function main() {
             assert.equal(reports.join(""), data);
             assert(reports.every(report => report.startsWith("\x1b[<" + (direction > 0 ? 64 : 65) + ";")));
           } else {
-            assert.equal(data, (direction > 0 ? mode.up : mode.down).repeat(SWIPE_LINES));
+            assert.equal(data, direction > 0 ? mode.up : mode.down,
+              "swipes page through displayed text without sending prompt-history arrow keys");
           }
           sent += data;
         }
@@ -106,7 +107,7 @@ async function main() {
       await output(page, MODES[0].sequence);
       await swipe(page, start, distance, 30);
       const partial = await received();
-      assert.equal(partial, MODES[0].up.repeat(SWIPE_LINES), "small movements accumulate into lines");
+      assert.equal(partial, MODES[0].up, "one swipe sends one page key across multiple movements");
       sent += partial;
 
       await touch(page, "touchstart", [start]);

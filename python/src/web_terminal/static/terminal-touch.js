@@ -3,6 +3,8 @@
 const TOUCH_SCROLL_THRESHOLD = 8;
 const TOUCH_SCROLL_BUFFER = "alternate";
 const TOUCH_SCROLL_MOUSE_DISABLED = "none";
+const TOUCH_SCROLL_PAGE_UP = "\x1b[5~";
+const TOUCH_SCROLL_PAGE_DOWN = "\x1b[6~";
 
 function enableTouchScrolling(terminal, threshold = TOUCH_SCROLL_THRESHOLD) {
   const element = terminal.element;
@@ -24,6 +26,7 @@ function enableTouchScrolling(terminal, threshold = TOUCH_SCROLL_THRESHOLD) {
       y: touch.clientY,
       lastY: touch.clientY,
       remainder: 0,
+      pageSent: false,
       scrolling: false
     };
   }, { capture: true, passive: true });
@@ -50,9 +53,17 @@ function enableTouchScrolling(terminal, threshold = TOUCH_SCROLL_THRESHOLD) {
       gesture.scrolling = true;
     }
 
-    // xterm's wheel handler selects mouse reports or cursor keys for the active program.
     if (event.cancelable) event.preventDefault();
     event.stopImmediatePropagation();
+    if (terminal.modes.mouseTrackingMode === TOUCH_SCROLL_MOUSE_DISABLED) {
+      if (!gesture.pageSent) {
+        terminal.input(touch.clientY > gesture.y ? TOUCH_SCROLL_PAGE_UP : TOUCH_SCROLL_PAGE_DOWN, true);
+        gesture.pageSent = true;
+      }
+      return;
+    }
+
+    // xterm's wheel handler encodes mouse scroll reports for the active program.
     gesture.remainder += gesture.lastY - touch.clientY;
     gesture.lastY = touch.clientY;
     const rowHeight = screen.getBoundingClientRect().height / terminal.rows;
